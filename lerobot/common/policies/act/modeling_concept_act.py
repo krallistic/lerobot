@@ -1,9 +1,9 @@
-
 from lerobot.common.policies.act.modeling_act import ACTPolicy, ACT, ACTDecoder, ACTEncoder
 from lerobot.common.policies.act.configuration_act import ACTConfig
 import torch
 from torch import Tensor, nn
 import einops
+import torch.nn.functional as F  # noqa: N812
 
 
 class ConceptACTPolicy(ACTPolicy):
@@ -17,6 +17,15 @@ class ConceptACTPolicy(ACTPolicy):
 
         self.model = ConceptACT(config)
 
+        # Set up concept normalization if concept learning is enabled
+        if config.use_concept_learning and "concept" in dataset_stats:
+            self.normalize_concepts = nn.ModuleDict({
+                "concept": self.normalize_inputs.normalization_modules["observation.concept"]
+            })
+            self.unnormalize_concepts = nn.ModuleDict({
+                "concept": self.unnormalize_outputs.unnormalization_modules["observation.concept"]
+            })
+
         self.reset()
 
 
@@ -28,173 +37,327 @@ class ConceptACTPolicy(ACTPolicy):
             batch["observation.images"] = [batch[key] for key in self.config.image_features]
 
         batch = self.normalize_targets(batch)
-        actions_hat, (mu_hat, log_sigma_x2_hat) = self.model(batch)
-
+        
+        # Call the model with different outputs based on whether concept learning is enabled
+        if self.config.use_concept_learning:
+            actions_hat, (mu_hat, log_sigma_x2_hat), concepts_hat = self.model(batch)
+        else:
+            actions_hat, (mu_hat, log_sigma_x2_hat) = self.model(batch)
+            
+        # Calculate action reconstruction loss - common for all configurations
         l1_loss = (
             F.l1_loss(batch["action"], actions_hat, reduction="none") * ~batch["action_is_pad"].unsqueeze(-1)
         ).mean()
-
+        
+        # Initialize loss dictionary with L1 loss
         loss_dict = {"l1_loss": l1_loss.item()}
+        total_loss = l1_loss
+        
+        # Add concept loss if concept learning is enabled
+        if self.config.use_concept_learning and "observation.concept" in batch:
+            concept_loss = F.mse_loss(batch["observation.concept"], concepts_hat)
+            loss_dict["concept_loss"] = concept_loss.item()
+            total_loss = total_loss + concept_loss * self.config.concept_weight
+        elif self.config.use_concept_learning:
+            # Add zero concept loss if concept learning is enabled but no concepts are provided
+            loss_dict["concept_loss"] = 0.0
+        
+        # Add KL divergence loss if VAE is enabled
         if self.config.use_vae:
-            # Calculate Dₖₗ(latent_pdf || standard_normal). Note: After computing the KL-divergence for
-            # each dimension independently, we sum over the latent dimension to get the total
-            # KL-divergence per batch element, then take the mean over the batch.
-            # (See App. B of https://arxiv.org/abs/1312.6114 for more details).
+            # Calculate Dₖₗ(latent_pdf || standard_normal)
             mean_kld = (
                 (-0.5 * (1 + log_sigma_x2_hat - mu_hat.pow(2) - (log_sigma_x2_hat).exp())).sum(-1).mean()
             )
             loss_dict["kld_loss"] = mean_kld.item()
-            loss = l1_loss + mean_kld * self.config.kl_weight
-        else:
-            loss = l1_loss
+            total_loss = total_loss + mean_kld * self.config.kl_weight
 
-        return loss, loss_dict
+        return total_loss, loss_dict
+
+    @torch.no_grad()
+    def select_action(self, batch: dict[str, Tensor]) -> Tensor:
+        """Select a single action given environment observations."""
+        self.eval()
+
+        batch = self.normalize_inputs(batch)
+        if self.config.image_features:
+            batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
+            batch["observation.images"] = [batch[key] for key in self.config.image_features]
+
+        # Concept learning has no impact on action selection, as we only use the action outputs
+        if self.config.use_concept_learning:
+            actions, _, _ = self.model(batch)
+        else:
+            actions, _ = self.model(batch)
+
+        # If we are doing temporal ensembling, do online updates where we keep track of the number of actions
+        # we are ensembling over.
+        if self.config.temporal_ensemble_coeff is not None:
+            actions = actions[0]  # (batch_size, chunk_size, action_dim)
+            actions = self.unnormalize_outputs({"action": actions})["action"]
+            action = self.temporal_ensembler.update(actions)
+            return action
+
+        # Action queue logic for n_action_steps > 1. When the action_queue is depleted, populate it by
+        # querying the policy.
+        if len(self._action_queue) == 0:
+            actions = actions[:, : self.config.n_action_steps]
+
+            # TODO(rcadene): make _forward return output dictionary?
+            actions = self.unnormalize_outputs({"action": actions})["action"]
+
+            # `self.model.forward` returns a (batch_size, n_action_steps, action_dim) tensor, but the queue
+            # effectively has shape (n_action_steps, batch_size, *), hence the transpose.
+            self._action_queue.extend(actions.transpose(0, 1))
+        return self._action_queue.popleft()
+
+
+class ConceptTransformer(nn.Module):
+    """A transformer-based concept learning module for predicting concepts from encoded features.
+    
+    This module uses a transformer architecture to extract and predict concepts from the 
+    encoded features. It works by:
+    1. Using a learnable concept query token
+    2. Running it through a transformer decoder that attends to the encoded features
+    3. Projecting the resulting representation to the concept space
+    
+    This approach is inspired by the DETR (DEtection TRansformer) architecture, which uses
+    object queries to attend to relevant parts of the image features for object detection.
+    """
+    
+    def __init__(self, config: ACTConfig):
+        """Initialize the ConceptTransformer.
+        
+        Args:
+            config: Configuration for the transformer-based concept learning.
+        """
+        super().__init__()
+        
+        # Encoder to process the input tokens
+        self.encoder = ACTEncoder(config)
+        
+        # Learnable concept query token (similar to DETR's object queries)
+        # This query will attend to relevant parts of the encoder output
+        self.concept_query = nn.Parameter(torch.randn(1, 1, config.dim_model))
+        
+        # Decoder for extracting concept-relevant information through cross-attention
+        self.decoder = ACTDecoder(config)
+        
+        # Final projection layer to map from hidden dimension to concept space
+        self.concept_head = nn.Linear(config.dim_model, config.concept_dim)
+        
+        # Initialize parameters
+        self._reset_parameters()
+    
+    def _reset_parameters(self):
+        """Initialize the parameters of the transformer with Xavier uniform distribution."""
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+    
+    def forward(self, encoder_out: Tensor, encoder_pos_embed: Tensor) -> Tensor:
+        """Process the encoder outputs to predict concepts.
+        
+        Args:
+            encoder_out: Output features from the encoder, shape (seq_len, batch_size, dim_model)
+            encoder_pos_embed: Positional embeddings for the encoder, shape (seq_len, batch_size, dim_model)
+            
+        Returns:
+            Predicted concepts with shape (batch_size, concept_dim)
+        """
+        batch_size = encoder_out.shape[1]
+        
+        # Expand the concept query to match the batch size
+        # The concept query acts as a learnable prompt that attends to relevant features
+        query = self.concept_query.expand(1, batch_size, -1)  # Shape: (1, batch_size, dim_model)
+        
+        # Use the decoder to attend to relevant parts of the encoder output
+        # The decoder performs cross-attention between the query and encoder outputs
+        decoder_out = self.decoder(
+            query,                        # Concept query as input
+            encoder_out,                  # Encoder outputs to attend to
+            encoder_pos_embed=encoder_pos_embed,  # Positional embeddings for encoder outputs
+            decoder_pos_embed=None        # No positional embedding for the single query token
+        )
+        
+        # Project decoder output to concept space
+        # Take the first (and only) token from the decoder output and project it
+        concepts = self.concept_head(decoder_out[0])  # Shape: (batch_size, concept_dim)
+        
+        return concepts
+
 
 """
 Options to include concepts:
-- Into VAE
+- Into VAE - INTO VAE is not a good idea because the VAE does not see the images as inputs, so it cant learn features like color.
     - Normal inputs to VAE, no extra loss.
     - Output to VAE, loss on difference. Prediction time 
     - Concept Transformer on the Attention in the ACTEncoderLayer (has usually 4 layers of ACTEncoderLayer, each with a MultiheadAttention
-- Into Encoder:
+- Into Encoder - Last layer of attention as concept attention:
     - concept transformer: Usually 4 layers of attention.
-    - 
-- Into Decoder:
+    - Prediction outputs.
+- Into Decoder - Downside of decoder is that is has only the latent representation as the input...:
     - concept transformer: Usually only 1 layers 
     - Prediction outputs.
 
 """
 class ConceptACT(ACT):
+    """Action Chunking Transformer with concept learning capabilities.
+    
+    This class extends the ACT model to include concept learning in two ways:
+    1. Using a prediction head on the encoder output ("prediction_head" method)
+    2. Using a separate transformer for concept learning ("transformer" method)
+    """
+    def __init__(self, config: ACTConfig):
+        super().__init__(config)
+        
+        # Add components for concept learning if enabled
+        if config.use_concept_learning:
+            if config.concept_method == "prediction_head":
+                # Create prediction head for concepts using the encoder's output
+                self.concept_head = nn.Linear(config.dim_model, config.concept_dim)
+            elif config.concept_method == "transformer":
+                # Create a transformer-based concept learning module
+                self.concept_transformer = ConceptTransformer(config)
 
 
-    def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, tuple[Tensor, Tensor] | tuple[None, None]]:
-        """A forward pass through the Action Chunking Transformer (with optional VAE encoder).
+    def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, tuple[Tensor, Tensor] | tuple[None, None], Tensor | None]:
+        """A forward pass through the Action Chunking Transformer with concept learning.
 
-        `batch` should have the following structure:
-        {
-            [robot_state_feature] (optional): (B, state_dim) batch of robot states.
-
-            [image_features]: (B, n_cameras, C, H, W) batch of images.
-                AND/OR
-            [env_state_feature]: (B, env_dim) batch of environment states.
-
-            [action_feature] (optional, only if training with VAE): (B, chunk_size, action dim) batch of actions.
-        }
+        Args:
+            batch: Dictionary containing observation data, and optionally action data during training.
 
         Returns:
-            (B, chunk_size, action_dim) batch of action sequences
-            Tuple containing the latent PDF's parameters (mean, log(σ²)) both as (B, L) tensors where L is the
-            latent dimension.
+            actions: (B, chunk_size, action_dim) batch of action sequences
+            latent_params: Tuple containing the latent PDF's parameters (mean, log(σ²)) 
+                           both as (B, L) tensors where L is the latent dimension.
+            concepts: (B, concept_dim) batch of predicted concepts when concept learning is enabled,
+                     otherwise None.
         """
+        # -------------------- 1. Process inputs and prepare batch --------------------
         if self.config.use_vae and self.training:
             assert "action" in batch, (
                 "actions must be provided when using the variational objective in training mode."
             )
 
+        # Determine batch size from available inputs
         if "observation.images" in batch:
             batch_size = batch["observation.images"][0].shape[0]
         else:
             batch_size = batch["observation.environment_state"].shape[0]
 
-        # Prepare the latent for input to the transformer encoder.
+        # -------------------- 2. VAE Encoding (if applicable) --------------------
+        # Process the VAE encoding path if using VAE and we have actions (typically during training)
         if self.config.use_vae and "action" in batch:
-            # Prepare the input to the VAE encoder: [cls, *joint_space_configuration, *action_sequence].
+            # Prepare VAE encoder inputs
             cls_embed = einops.repeat(
                 self.vae_encoder_cls_embed.weight, "1 d -> b 1 d", b=batch_size
             )  # (B, 1, D)
+            
+            # Add robot state if available
             if self.config.robot_state_feature:
                 robot_state_embed = self.vae_encoder_robot_state_input_proj(batch["observation.state"])
                 robot_state_embed = robot_state_embed.unsqueeze(1)  # (B, 1, D)
-            action_embed = self.vae_encoder_action_input_proj(batch["action"])  # (B, S, D)
-
-            if self.config.robot_state_feature:
-                vae_encoder_input = [cls_embed, robot_state_embed, action_embed]  # (B, S+2, D)
+                vae_encoder_input = [cls_embed, robot_state_embed, self.vae_encoder_action_input_proj(batch["action"])]
             else:
-                vae_encoder_input = [cls_embed, action_embed]
+                vae_encoder_input = [cls_embed, self.vae_encoder_action_input_proj(batch["action"])]
+            
             vae_encoder_input = torch.cat(vae_encoder_input, axis=1)
-
-            # Prepare fixed positional embedding.
-            # Note: detach() shouldn't be necessary but leaving it the same as the original code just in case.
+            
+            # Prepare positional embeddings and padding mask
             pos_embed = self.vae_encoder_pos_enc.clone().detach()  # (1, S+2, D)
-
-            # Prepare key padding mask for the transformer encoder. We have 1 or 2 extra tokens at the start of the
-            # sequence depending whether we use the input states or not (cls and robot state)
-            # False means not a padding token.
             cls_joint_is_pad = torch.full(
                 (batch_size, 2 if self.config.robot_state_feature else 1),
                 False,
                 device=batch["observation.state"].device,
             )
-            key_padding_mask = torch.cat(
-                [cls_joint_is_pad, batch["action_is_pad"]], axis=1
-            )  # (bs, seq+1 or 2)
-
-            # Forward pass through VAE encoder to get the latent PDF parameters.
+            key_padding_mask = torch.cat([cls_joint_is_pad, batch["action_is_pad"]], axis=1)
+            
+            # Forward pass through VAE encoder
             cls_token_out = self.vae_encoder(
                 vae_encoder_input.permute(1, 0, 2),
                 pos_embed=pos_embed.permute(1, 0, 2),
                 key_padding_mask=key_padding_mask,
             )[0]  # select the class token, with shape (B, D)
+            
+            # Get latent distribution parameters
             latent_pdf_params = self.vae_encoder_latent_output_proj(cls_token_out)
             mu = latent_pdf_params[:, : self.config.latent_dim]
-            # This is 2log(sigma). Done this way to match the original implementation.
-            log_sigma_x2 = latent_pdf_params[:, self.config.latent_dim :]
-
-            # Sample the latent with the reparameterization trick.
+            log_sigma_x2 = latent_pdf_params[:, self.config.latent_dim :]  # 2log(sigma)
+            
+            # Sample latent with reparameterization trick
             latent_sample = mu + log_sigma_x2.div(2).exp() * torch.randn_like(mu)
         else:
-            # When not using the VAE encoder, we set the latent to be all zeros.
+            # When not using the VAE encoder, use a zero latent
             mu = log_sigma_x2 = None
-            # TODO(rcadene, alexander-soare): remove call to `.to` to speedup forward ; precompute and use buffer
             latent_sample = torch.zeros([batch_size, self.config.latent_dim], dtype=torch.float32).to(
                 batch["observation.state"].device
             )
 
-        # Prepare transformer encoder inputs.
+        # -------------------- 3. Prepare transformer encoder inputs --------------------
+        # Prepare token sequence for the encoder: [latent, (robot_state), (env_state), (image_features)]
         encoder_in_tokens = [self.encoder_latent_input_proj(latent_sample)]
         encoder_in_pos_embed = list(self.encoder_1d_feature_pos_embed.weight.unsqueeze(1))
-        # Robot state token.
+        
+        # Add robot state token if available
         if self.config.robot_state_feature:
             encoder_in_tokens.append(self.encoder_robot_state_input_proj(batch["observation.state"]))
-        # Environment state token.
+            
+        # Add environment state token if available
         if self.config.env_state_feature:
             encoder_in_tokens.append(
                 self.encoder_env_state_input_proj(batch["observation.environment_state"])
             )
 
-        # Camera observation features and positional embeddings.
+        # Add camera features and positional embeddings if available
         if self.config.image_features:
             all_cam_features = []
             all_cam_pos_embeds = []
 
-            # For a list of images, the H and W may vary but H*W is constant.
             for img in batch["observation.images"]:
+                # Extract features from backbone
                 cam_features = self.backbone(img)["feature_map"]
                 cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features).to(dtype=cam_features.dtype)
                 cam_features = self.encoder_img_feat_input_proj(cam_features)
 
-                # Rearrange features to (sequence, batch, dim).
+                # Reshape to sequence format
                 cam_features = einops.rearrange(cam_features, "b c h w -> (h w) b c")
                 cam_pos_embed = einops.rearrange(cam_pos_embed, "b c h w -> (h w) b c")
 
                 all_cam_features.append(cam_features)
                 all_cam_pos_embeds.append(cam_pos_embed)
 
+            # Add all camera features to the token sequence
             encoder_in_tokens.extend(torch.cat(all_cam_features, axis=0))
             encoder_in_pos_embed.extend(torch.cat(all_cam_pos_embeds, axis=0))
 
-        # Stack all tokens along the sequence dimension.
+        # Stack tokens along the sequence dimension
         encoder_in_tokens = torch.stack(encoder_in_tokens, axis=0)
         encoder_in_pos_embed = torch.stack(encoder_in_pos_embed, axis=0)
 
-        # Forward pass through the transformer modules.
+        # -------------------- 4. Forward pass through transformer --------------------
+        # Encode features
         encoder_out = self.encoder(encoder_in_tokens, pos_embed=encoder_in_pos_embed)
-        # TODO(rcadene, alexander-soare): remove call to `device` ; precompute and use buffer
+        
+        # -------------------- 5. Concept prediction (if enabled) --------------------
+        concepts = None
+        if self.config.use_concept_learning:
+            if self.config.concept_method == "prediction_head":
+                # Use first token from encoder output to predict concepts
+                concept_token = encoder_out[0]  # Shape: (batch_size, dim_model)
+                concepts = self.concept_head(concept_token)  # Shape: (batch_size, concept_dim)
+            elif self.config.concept_method == "transformer":
+                # Use transformer-based concept learning
+                concepts = self.concept_transformer(encoder_out, encoder_in_pos_embed)
+        
+        # -------------------- 6. Action prediction --------------------
+        # Prepare decoder input (zeros initialized)
         decoder_in = torch.zeros(
             (self.config.chunk_size, batch_size, self.config.dim_model),
             dtype=encoder_in_pos_embed.dtype,
             device=encoder_in_pos_embed.device,
         )
+        
+        # Run decoder with cross-attention to encoder output
         decoder_out = self.decoder(
             decoder_in,
             encoder_out,
@@ -202,9 +365,12 @@ class ConceptACT(ACT):
             decoder_pos_embed=self.decoder_pos_embed.weight.unsqueeze(1),
         )
 
-        # Move back to (B, S, C).
-        decoder_out = decoder_out.transpose(0, 1)
+        # Move to batch-first format and predict actions
+        decoder_out = decoder_out.transpose(0, 1)  # (B, S, C)
+        actions = self.action_head(decoder_out)  # (B, S, action_dim)
 
-        actions = self.action_head(decoder_out)
-
-        return actions, (mu, log_sigma_x2)
+        # Return appropriate outputs based on configuration
+        if self.config.use_concept_learning:
+            return actions, (mu, log_sigma_x2), concepts
+        else:
+            return actions, (mu, log_sigma_x2)

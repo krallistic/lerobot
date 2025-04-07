@@ -28,7 +28,7 @@ class ACTConfig(PreTrainedConfig):
     Defaults are configured for training on bimanual Aloha tasks like "insertion" or "transfer".
 
     The parameters you will most likely need to change are the ones which depend on the environment / sensors.
-    Those are: `input_shapes` and 'output_shapes`.
+    Those are: `input_shapes` and 'output_shapes'.
 
     Notes on the inputs and outputs:
         - Either:
@@ -88,6 +88,10 @@ class ACTConfig(PreTrainedConfig):
         dropout: Dropout to use in the transformer layers (see code for details).
         kl_weight: The weight to use for the KL-divergence component of the loss if the variational objective
             is enabled. Loss is then calculated as: `reconstruction_loss + kl_weight * kld_loss`.
+        use_concept_learning: Whether to use concept learning in the model.
+        concept_method: Method to use for concept learning. Options are "transformer" or "prediction_head".
+        concept_dim: The dimension of the concept space.
+        concept_weight: The weight for the concept loss in the total loss.
     """
 
     # Input / output structure.
@@ -100,6 +104,7 @@ class ACTConfig(PreTrainedConfig):
             "VISUAL": NormalizationMode.MEAN_STD,
             "STATE": NormalizationMode.MEAN_STD,
             "ACTION": NormalizationMode.MEAN_STD,
+            "CONCEPT": NormalizationMode.MEAN_STD,
         }
     )
 
@@ -132,6 +137,12 @@ class ACTConfig(PreTrainedConfig):
     dropout: float = 0.1
     kl_weight: float = 10.0
 
+    # Concept learning.
+    use_concept_learning: bool = False
+    concept_method: str = "prediction_head"  # Options: "prediction_head", "transformer"
+    concept_dim: int = 32
+    concept_weight: float = 1.0
+
     # Training preset
     optimizer_lr: float = 1e-5
     optimizer_weight_decay: float = 1e-4
@@ -158,6 +169,10 @@ class ACTConfig(PreTrainedConfig):
         if self.n_obs_steps != 1:
             raise ValueError(
                 f"Multiple observation steps not handled yet. Got `nobs_steps={self.n_obs_steps}`"
+            )
+        if self.use_concept_learning and self.concept_method not in ["prediction_head", "transformer"]:
+            raise ValueError(
+                f"Concept method must be one of 'prediction_head' or 'transformer'. Got {self.concept_method}."
             )
 
     def get_optimizer_preset(self) -> AdamWConfig:
