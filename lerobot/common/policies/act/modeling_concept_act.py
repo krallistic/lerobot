@@ -7,18 +7,30 @@ import torch.nn.functional as F  # noqa: N812
 
 
 class ConceptACTPolicy(ACTPolicy):
+    """ACT Policy with concept learning capabilities.
+    
+    This class extends the standard ACTPolicy by adding concept learning,
+    which can help the model develop better representations of the task.
+    """
+    
+    type = "concept_act"  # This identifies the policy type in the factory
 
     def __init__(
         self,
         config: ACTConfig,
         dataset_stats: dict[str, dict[str, Tensor]] | None = None,
     ):
+        # Make sure concept learning is enabled in config
+        config.use_concept_learning = True
+        
+        # Initialize parent class
         super().__init__(config=config, dataset_stats=dataset_stats)
-
+        
+        # Replace the standard ACT model with our ConceptACT model
         self.model = ConceptACT(config)
 
         # Set up concept normalization if concept learning is enabled
-        if config.use_concept_learning and "concept" in dataset_stats:
+        if "concept" in dataset_stats:
             self.normalize_concepts = nn.ModuleDict({
                 "concept": self.normalize_inputs.normalization_modules["observation.concept"]
             })
