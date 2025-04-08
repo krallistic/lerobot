@@ -286,6 +286,8 @@ def record(
         robot.teleop_safety_stop()
 
     recorded_episodes = 0
+    log_say("Done Warmup", cfg.play_sounds)
+
     while True:
         if recorded_episodes >= cfg.num_episodes:
             break
@@ -311,6 +313,7 @@ def record(
         ):
             log_say("Reset the environment", cfg.play_sounds)
             reset_environment(robot, events, cfg.reset_time_s, cfg.fps)
+            log_say("Done reset the environment", cfg.play_sounds)
 
         if events["rerecord_episode"]:
             log_say("Re-record episode", cfg.play_sounds)
