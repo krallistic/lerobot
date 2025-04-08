@@ -54,7 +54,32 @@ class ConceptACTPolicy(ACTPolicy):
         total_loss = l1_loss
         
         # Add concept loss if concept learning is enabled
-        if self.config.use_concept_learning and "observation.concept" in batch:
+        if self.config.use_concept_learning and self.config.concept_method == "prediction_head":
+            concept_loss = 0.0
+            
+            # Calculate cross-entropy loss for each concept type defined in config
+            for concept_type in self.config.concept_types.keys():
+                if concept_type in batch and concept_type in concepts_hat:
+                    # Get the predicted logits and true one-hot encoding
+                    logits = concepts_hat[concept_type]
+                    targets = batch[concept_type]
+                    
+                    # Calculate cross-entropy loss (assuming targets are one-hot encoded)
+                    # For one-hot targets, we need to convert to class indices for cross-entropy
+                    if targets.dim() > 1 and targets.shape[-1] > 1:  # One-hot encoded
+                        targets = targets.argmax(dim=-1)
+                        
+                    # Add cross-entropy loss for this concept type
+                    ce_loss = F.cross_entropy(logits, targets)
+                    concept_loss += ce_loss
+                    loss_dict[f"{concept_type}_loss"] = ce_loss.item()
+            
+            # Add the total concept loss to the overall loss
+            loss_dict["concept_loss"] = concept_loss.item()
+            total_loss = total_loss + concept_loss * self.config.concept_weight
+            
+        elif self.config.use_concept_learning and self.config.concept_method == "transformer":
+            # For transformer method, keep the existing MSE loss implementation
             concept_loss = F.mse_loss(batch["observation.concept"], concepts_hat)
             loss_dict["concept_loss"] = concept_loss.item()
             total_loss = total_loss + concept_loss * self.config.concept_weight
@@ -204,7 +229,7 @@ class ConceptACT(ACT):
     """Action Chunking Transformer with concept learning capabilities.
     
     This class extends the ACT model to include concept learning in two ways:
-    1. Using a prediction head on the encoder output ("prediction_head" method)
+    1. Using prediction heads on the encoder output for each concept type ("prediction_head" method)
     2. Using a separate transformer for concept learning ("transformer" method)
     """
     def __init__(self, config: ACTConfig):
@@ -213,14 +238,17 @@ class ConceptACT(ACT):
         # Add components for concept learning if enabled
         if config.use_concept_learning:
             if config.concept_method == "prediction_head":
-                # Create prediction head for concepts using the encoder's output
-                self.concept_head = nn.Linear(config.dim_model, config.concept_dim)
+                # Create prediction heads for each concept type defined in config
+                self.concept_heads = nn.ModuleDict({
+                    concept_name: nn.Linear(config.dim_model, num_classes)
+                    for concept_name, num_classes in config.concept_types.items()
+                })
             elif config.concept_method == "transformer":
                 # Create a transformer-based concept learning module
                 self.concept_transformer = ConceptTransformer(config)
 
 
-    def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, tuple[Tensor, Tensor] | tuple[None, None], Tensor | None]:
+    def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, tuple[Tensor, Tensor] | tuple[None, None], dict[str, Tensor] | None]:
         """A forward pass through the Action Chunking Transformer with concept learning.
 
         Args:
@@ -230,8 +258,8 @@ class ConceptACT(ACT):
             actions: (B, chunk_size, action_dim) batch of action sequences
             latent_params: Tuple containing the latent PDF's parameters (mean, log(σ²)) 
                            both as (B, L) tensors where L is the latent dimension.
-            concepts: (B, concept_dim) batch of predicted concepts when concept learning is enabled,
-                     otherwise None.
+            concepts: Dictionary of predicted concepts with one-hot encodings for each concept type,
+                     or None if concept learning is disabled.
         """
         # -------------------- 1. Process inputs and prepare batch --------------------
         if self.config.use_vae and self.training:
@@ -344,7 +372,12 @@ class ConceptACT(ACT):
             if self.config.concept_method == "prediction_head":
                 # Use first token from encoder output to predict concepts
                 concept_token = encoder_out[0]  # Shape: (batch_size, dim_model)
-                concepts = self.concept_head(concept_token)  # Shape: (batch_size, concept_dim)
+                
+                # Create dictionary of predictions for each concept type
+                concepts = {}
+                for concept_name, head in self.concept_heads.items():
+                    # Each head outputs logits for its concept type
+                    concepts[concept_name] = head(concept_token)
             elif self.config.concept_method == "transformer":
                 # Use transformer-based concept learning
                 concepts = self.concept_transformer(encoder_out, encoder_in_pos_embed)

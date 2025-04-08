@@ -92,6 +92,9 @@ class ACTConfig(PreTrainedConfig):
         concept_method: Method to use for concept learning. Options are "transformer" or "prediction_head".
         concept_dim: The dimension of the concept space.
         concept_weight: The weight for the concept loss in the total loss.
+        concept_types: Dictionary mapping concept names to their dimensions. Used when concept_method is "prediction_head".
+            Each key is a concept name and each value is the number of classes for that concept.
+            Example: {"concept_color": 4, "concept_shape": 3, "concept_location": 5, "concept_dropoff": 2}
     """
 
     # Input / output structure.
@@ -142,6 +145,14 @@ class ACTConfig(PreTrainedConfig):
     concept_method: str = "prediction_head"  # Options: "prediction_head", "transformer"
     concept_dim: int = 32
     concept_weight: float = 1.0
+    concept_types: dict = field(
+        default_factory=lambda: {
+            "concept_color": 4,  # red, green, yellow, blue
+            "concept_shape": 3,  # cube, rectangle, cylinder
+            "concept_location": 5,  # 1, 2, 3, 4, 5
+            "concept_dropoff": 2,  # A, B
+        }
+    )
 
     # Training preset
     optimizer_lr: float = 1e-5
@@ -173,6 +184,10 @@ class ACTConfig(PreTrainedConfig):
         if self.use_concept_learning and self.concept_method not in ["prediction_head", "transformer"]:
             raise ValueError(
                 f"Concept method must be one of 'prediction_head' or 'transformer'. Got {self.concept_method}."
+            )
+        if self.use_concept_learning and self.concept_method == "prediction_head" and not self.concept_types:
+            raise ValueError(
+                "When using concept learning with 'prediction_head' method, concept_types must be provided."
             )
 
     def get_optimizer_preset(self) -> AdamWConfig:
