@@ -50,6 +50,10 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
         from lerobot.common.policies.act.modeling_act import ACTPolicy
 
         return ACTPolicy
+    elif name == "concept_act":
+        from lerobot.common.policies.act.modeling_concept_act import ConceptACTPolicy
+
+        return ConceptACTPolicy
     elif name == "vqbet":
         from lerobot.common.policies.vqbet.modeling_vqbet import VQBeTPolicy
 
@@ -85,6 +89,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return DiffusionConfig(**kwargs)
     elif policy_type == "act":
         return ACTConfig(**kwargs)
+    elif policy_type == "concept_act":
+        return ACTConfig(**kwargs)  # ConceptACT uses the ACTConfig
     elif policy_type == "vqbet":
         return VQBeTConfig(**kwargs)
     elif policy_type == "pi0":
