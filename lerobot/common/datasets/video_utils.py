@@ -247,7 +247,7 @@ def encode_video_frames(
     imgs_dir: Path | str,
     video_path: Path | str,
     fps: int,
-    vcodec: str = "libsvtav1",
+    vcodec: str = "libopenh264",
     pix_fmt: str = "yuv420p",
     g: int | None = 2,
     crf: int | None = 30,
@@ -257,7 +257,6 @@ def encode_video_frames(
 ) -> None:
     """More info on ffmpeg arguments tuning on `benchmark/video/README.md`"""
     video_path = Path(video_path)
-    imgs_dir = Path(imgs_dir)
     video_path.parent.mkdir(parents=True, exist_ok=True)
 
     ffmpeg_args = OrderedDict(
