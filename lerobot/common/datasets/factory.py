@@ -96,12 +96,23 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
             revision=cfg.dataset.revision,
             video_backend=cfg.dataset.video_backend,
         )
+        if cfg.dataset.use_imagenet_stats:
+            for key in dataset.meta.camera_keys:
+                for stats_type, stats in IMAGENET_STATS.items():
+                    dataset.meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)
     else:
-        raise NotImplementedError("The MultiLeRobotDataset isn't supported for now.")
+        print("Warning custom MultiLeRobotDataset")
+        #raise NotImplementedError("The MultiLeRobotDataset isn't supported for now.")
+        ds_meta = LeRobotDatasetMetadata(
+            cfg.dataset.repo_id[0], root=cfg.dataset.root, revision=cfg.dataset.revision
+        )
+
+        delta_timestamps = resolve_delta_timestamps(cfg.policy, ds_meta)
+
         dataset = MultiLeRobotDataset(
-            cfg.dataset.repo_id,
-            # TODO(aliberts): add proper support for multi dataset
-            # delta_timestamps=delta_timestamps,
+            repo_ids=cfg.dataset.repo_id,
+            root=cfg.dataset.root,
+            delta_timestamps=delta_timestamps,
             image_transforms=image_transforms,
             video_backend=cfg.dataset.video_backend,
         )
@@ -109,10 +120,12 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
             "Multiple datasets were provided. Applied the following index mapping to the provided datasets: "
             f"{pformat(dataset.repo_id_to_index, indent=2)}"
         )
+        if cfg.dataset.use_imagenet_stats:
+             for dataset_idx in range(len(dataset._datasets)):
+                 for key in dataset._datasets[dataset_idx].meta.camera_keys:
+                     for stats_type, stats in IMAGENET_STATS.items():
+                         dataset._datasets[dataset_idx].meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)
 
-    if cfg.dataset.use_imagenet_stats:
-        for key in dataset.meta.camera_keys:
-            for stats_type, stats in IMAGENET_STATS.items():
-                dataset.meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)
+
 
     return dataset
