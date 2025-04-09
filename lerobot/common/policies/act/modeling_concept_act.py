@@ -1,5 +1,5 @@
 from lerobot.common.policies.act.modeling_act import ACTPolicy, ACT, ACTDecoder, ACTEncoder
-from lerobot.common.policies.act.configuration_act import ACTConfig
+from lerobot.common.policies.act.configuration_concept_act import ConceptACTConfig
 import torch
 from torch import Tensor, nn
 import einops
@@ -17,7 +17,7 @@ class ConceptACTPolicy(ACTPolicy):
 
     def __init__(
         self,
-        config: ACTConfig,
+        config: ConceptACTConfig,
         dataset_stats: dict[str, dict[str, Tensor]] | None = None,
     ):
         # Make sure concept learning is enabled in config
@@ -161,7 +161,7 @@ class ConceptTransformer(nn.Module):
     object queries to attend to relevant parts of the image features for object detection.
     """
     
-    def __init__(self, config: ACTConfig):
+    def __init__(self, config: ConceptACTConfig):
         """Initialize the ConceptTransformer.
         
         Args:
@@ -244,7 +244,7 @@ class ConceptACT(ACT):
     1. Using prediction heads on the encoder output for each concept type ("prediction_head" method)
     2. Using a separate transformer for concept learning ("transformer" method)
     """
-    def __init__(self, config: ACTConfig):
+    def __init__(self, config: ConceptACTConfig):
         super().__init__(config)
         
         # Add components for concept learning if enabled
