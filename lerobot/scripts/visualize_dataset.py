@@ -165,6 +165,11 @@ def visualize_dataset(
                 for dim_idx, val in enumerate(batch["observation.state"][i]):
                     rr.log(f"state/{dim_idx}", rr.Scalar(val.item()))
 
+            for key in batch:
+                if key.startswith("concept_"):
+                    for j in range(batch[key].shape):
+                        rr.log(f"concept/{key}_{j}", rr.Scalar(batch[key][i][j].item()))
+
             if "next.done" in batch:
                 rr.log("next.done", rr.Scalar(batch["next.done"][i].item()))
 

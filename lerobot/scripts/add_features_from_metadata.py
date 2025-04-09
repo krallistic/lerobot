@@ -33,6 +33,7 @@ import tempfile
 from typing import Dict, List, Optional, Any, Union
 import glob
 
+import numpy as np
 import torch
 import tqdm
 
@@ -56,25 +57,25 @@ def create_feature_configurations() -> Dict[str, Dict[str, Any]]:
     feature_configs = {
         "concept_color": {
             "dtype": "int64",
-            "shape": [len(all_colors)],
+            "shape": (len(all_colors),),
             "names": [f"concept_color_{color}" for color in all_colors],
             "values": all_colors,
         },
         "concept_shape": {
             "dtype": "int64",
-            "shape": [len(all_shapes)],
+            "shape": tuple([len(all_shapes)]),
             "names": [f"concept_shape_{shape}" for shape in all_shapes],
             "values": all_shapes,
         },
         "concept_location": {
             "dtype": "int64",
-            "shape": [len(all_locations)],
+            "shape": tuple([len(all_locations)]),
             "names": [f"concept_location_{location}" for location in all_locations],
             "values": all_locations,
         },
         "concept_dropoff": {
             "dtype": "int64",
-            "shape": [len(all_dropoffs)],
+            "shape": tuple([len(all_dropoffs)]),
             "names": [f"concept_dropoff_{dropoff}" for dropoff in all_dropoffs],
             "values": all_dropoffs,
         },
@@ -109,7 +110,7 @@ def extract_features_from_metadata(
         
         # Initialize feature vectors with zeros
         feature_vectors = {
-            feature_name: [0] * len(config["values"]) 
+            feature_name: np.array([0] * len(config["values"]))
             for feature_name, config in feature_configs.items()
         }
         
@@ -179,7 +180,7 @@ def create_enhanced_dataset(
         # Remove the "values" key as it's not needed for dataset creation
         config_for_dataset = {k: v for k, v in feature_config.items() if k != "values"}
         features[feature_name] = config_for_dataset
-    
+    print(features)
     # Create the new dataset
     enhanced_dataset = LeRobotDataset.create(
         repo_id=target_repo_id,
@@ -187,9 +188,11 @@ def create_enhanced_dataset(
         root=root,
         robot_type=source_dataset.meta.robot_type,
         features=features,
-        use_videos=len(source_dataset.meta.video_keys) > 0,
+        use_videos=True,
+        image_writer_threads=4,
+
     )
-    
+
     return enhanced_dataset
 
 
@@ -205,27 +208,52 @@ def copy_and_enhance_episodes(
         enhanced_dataset: Target enhanced LeRobotDataset
         new_features: Dictionary mapping from episode_index to a dict of new features
     """
-    for episode_index in range(source_dataset.meta.total_episodes):
+
+    enhanced_dataset.start_image_writer(4)
+    print(enhanced_dataset.meta.camera_keys)
+    for episode_index in tqdm.tqdm(range(source_dataset.meta.total_episodes)):
         logging.info(f"Processing episode {episode_index}")
         
         # Get episode data
         episode_indices = source_dataset.meta.episodes[episode_index]
-        from_idx = source_dataset.hf_dataset[episode_indices["from"]:episode_indices["to"]]
-        
+        #print(source_dataset.episodes)
+        #print(source_dataset.episode_data_index)
+        #print(episode_indices)
+        #print(source_dataset.hf_dataset)
+        #print(source_dataset.image_transforms)
+        #print(enhanced_dataset.image_transforms)
+        from_to = list(range(source_dataset.episode_data_index['from'][episode_index], source_dataset.episode_data_index["to"][episode_index]))
+        #from_idx = source_dataset.hf_dataset[episode_indices["from"]:episode_indices["to"]]
+        #from_idx = source_dataset.hf_dataset.filter(lambda example: example['episode_index'] == episode_index)
+
         # Process each frame in the episode
-        for i in tqdm.tqdm(range(len(from_idx))):
-            frame = from_idx[i]
-            
-            # Add new features to the frame
+        for i in from_to:
+            frame = source_dataset[i]
+            #c, h, w = frame['observation.images.wrist'].shape
+            #print("Before:",frame['observation.images.wrist'].shape)
+            #frame['observation.images.wrist'] = frame['observation.images.wrist'].reshape(h, w, c)
+            #print("After:", frame['observation.images.wrist'].shape)
+            #c, h, w = frame['observation.images.webcam'].shape
+            #frame['observation.images.webcam'] = frame['observation.images.webcam'].reshape(h, w, c)
+
             episode_features = new_features[episode_index]
             for feature_name, feature_value in episode_features.items():
                 frame[feature_name] = feature_value
-            
+
+
+            del frame['index']
+            del frame['frame_index']
+            del frame['task_index']
+            del frame['episode_index']
+            del frame['timestamp']
+
+            #frame['timestamp'] = np.array(frame['timestamp'])
             # Add the enhanced frame to the new dataset
             enhanced_dataset.add_frame(frame)
         
         # Save the episode
         enhanced_dataset.save_episode()
+    enhanced_dataset.stop_image_writer()
 
 
 def find_datasets_by_prefix(prefix: str, root: Optional[Union[str, Path]] = None) -> List[str]:
@@ -335,6 +363,14 @@ def main():
                 feature_configs,
                 args.root
             )
+
+            from torchvision.transforms import ToPILImage, v2
+            transforms = v2.Compose(
+                [
+                    ToPILImage()
+                ]
+            )
+            source_dataset.image_transforms = transforms
             
             # Copy and enhance episodes
             logging.info("Copying and enhancing episodes")
@@ -345,8 +381,8 @@ def main():
             
         except Exception as e:
             logging.error(f"Error processing {source_repo_id}: {e}")
-            continue
-    
+            raise e
+
     logging.info("All datasets processed!")
 
 
