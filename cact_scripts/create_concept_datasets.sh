@@ -2,7 +2,7 @@
 
 # Configuration variables
 SOURCE_PREFIX="individual_cases_simple_"
-TARGET_SUFFIX="_with_concepts"
+TARGET_SUFFIX="with_concepts_"
 
 # Set library path to include conda environment libraries
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
