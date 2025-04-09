@@ -6,10 +6,10 @@ OUTPUT_DIR="outputs/train/concept_act_so100"
 JOB_NAME="concept_act_so100"
 DEVICE="cuda"  # Use "cuda" for GPU or "cpu" for CPU
 LEARNING_RATE=1e-5
-BATCH_SIZE=64
-STEPS=100000
+BATCH_SIZE=16
+STEPS=25000
 CONCEPT_WEIGHT=1.0  # Weight for concept loss component
-ENABLE_WANDB=false  # Set to true to enable Weights & Biases logging
+ENABLE_WANDB=true  # Set to true to enable Weights & Biases logging
 
 # Set library path to include conda environment libraries
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
@@ -38,7 +38,7 @@ echo "Dataset list: $DATASET_LIST"
 # Set up wandb flag
 WANDB_FLAG="--wandb.enable=false"
 if [ "$ENABLE_WANDB" = true ]; then
-    WANDB_FLAG="--wandb.enable=true"
+    WANDB_FLAG="--wandb.enable=true --wandb.disable_artifact=false --wandb.run_id=${JOB_NAME}"
     echo "Weights & Biases logging enabled"
 fi
 
@@ -51,10 +51,11 @@ python lerobot/scripts/train.py \
     --policy.device=$DEVICE \
     --policy.concept_weight=$CONCEPT_WEIGHT \
     --policy.optimizer_lr=$LEARNING_RATE \
-    --train.batch_size=$BATCH_SIZE \
-    --train.steps=$STEPS \
+    --batch_size=$BATCH_SIZE \
+    --steps=$STEPS \
     --policy.use_concept_learning=true \
     --policy.concept_method=prediction_head \
+    --log_freq=1000 \
     $WANDB_FLAG
 
 echo "Training completed!" 

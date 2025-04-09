@@ -89,15 +89,16 @@ def main():
     n_examples_evaluated = 0
     for batch in val_dataloader:
         batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
-        loss, _ = policy.forward(batch)
+        loss, output_dict = policy.forward(batch)
 
-        loss_cumsum += loss.item()
+        loss_cumsum += output_dict['l1_loss'] + output_dict['kld_loss']
         n_examples_evaluated += batch["index"].shape[0]
 
     # Calculate the average loss over the validation set.
     average_loss = loss_cumsum / n_examples_evaluated
 
     print(f"Average loss on validation set: {average_loss:.4f}")
+    return average_loss
 
 
 if __name__ == "__main__":

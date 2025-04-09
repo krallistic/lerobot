@@ -30,6 +30,7 @@ def cfg_to_group(cfg: TrainPipelineConfig, return_list: bool = False) -> list[st
     """Return a group name for logging. Optionally returns group name as list."""
     lst = [
         f"policy:{cfg.policy.type}",
+        #f"dataset:{cfg.dataset.repo_id}",
         f"seed:{cfg.seed}",
     ]
     if cfg.dataset is not None:

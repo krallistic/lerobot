@@ -52,6 +52,8 @@ from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
 from lerobot.scripts.eval import eval_policy
 
+from lerobot.common.policies.act.modeling_concept_act import ConceptACTPolicy
+
 
 def update_policy(
     train_metrics: MetricsTracker,
@@ -98,11 +100,82 @@ def update_policy(
         # To possibly update an internal buffer (for instance an Exponential Moving Average like in TDMPC).
         policy.update()
 
-    train_metrics.loss = loss.item()
+    train_metrics.total_loss = loss.item()
+    train_metrics.l1_loss = output_dict['l1_loss']
+    train_metrics.kld_loss = output_dict['kld_loss']
+    if type(policy) == ConceptACTPolicy:
+        train_metrics.concept_loss = output_dict['concept_loss']
+        train_metrics.normal_loss = output_dict['l1_loss'] + output_dict['kld_loss']
     train_metrics.grad_norm = grad_norm.item()
     train_metrics.lr = optimizer.param_groups[0]["lr"]
     train_metrics.update_s = time.perf_counter() - start_time
     return train_metrics, output_dict
+
+
+def validataion_loss_eval(policy: PreTrainedPolicy, dataloader: torch.utils.data.DataLoader):
+    loss_cumsum = 0
+    n_examples_evaluated = 0
+    for batch in dataloader:
+        for key in batch:
+            if isinstance(batch[key], torch.Tensor):
+                batch[key] = batch[key].to(policy.config.device, non_blocking=True)
+        with torch.autocast(device_type=policy.config.device) if False else nullcontext():
+            loss, _ = policy.forward(batch)
+
+        loss_cumsum += loss.item()
+        n_examples_evaluated += batch["index"].shape[0]
+
+    # Calculate the average loss over the validation set.
+    average_loss = loss_cumsum / n_examples_evaluated
+
+    return average_loss
+
+from torch.utils.data import random_split, DataLoader, Subset
+
+def split_dataset_random(dataset, cfg: TrainPipelineConfig, train_ratio=0.8):
+    """
+    Split a dataset into train and test sets using random_split.
+
+    Args:
+        dataset: PyTorch Dataset object
+        train_ratio: Proportion of data to use for training (default: 0.8)
+        seed: Random seed for reproducibility
+
+    Returns:
+        train_dataset, test_dataset
+    """
+    # Set seed for reproducibility
+    torch.manual_seed(cfg.seed)
+
+    # Calculate lengths
+    dataset_size = len(dataset)
+    train_size = int(train_ratio * dataset_size)
+    test_size = dataset_size - train_size
+
+    # Split the dataset
+    train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
+
+    train_dataloader = torch.utils.data.DataLoader(
+        dataset,
+        num_workers=cfg.num_workers,
+        batch_size=cfg.batch_size,
+        shuffle=True,
+        sampler=None,
+        pin_memory=cfg.policy.device != "cpu",
+        drop_last=False,
+    )
+
+    test_dataloader = torch.utils.data.DataLoader(
+        dataset,
+        num_workers=cfg.num_workers,
+        batch_size=cfg.batch_size,
+        shuffle=True,
+        sampler=None,
+        pin_memory=cfg.policy.device != "cpu",
+        drop_last=False,
+    )
+
+    return train_dataloader, test_dataloader
 
 
 @parser.wrap()
@@ -175,26 +248,28 @@ def train(cfg: TrainPipelineConfig):
         shuffle = True
         sampler = None
 
-    dataloader = torch.utils.data.DataLoader(
-        dataset,
-        num_workers=cfg.num_workers,
-        batch_size=cfg.batch_size,
-        shuffle=shuffle,
-        sampler=sampler,
-        pin_memory=device.type != "cpu",
-        drop_last=False,
-    )
-    dl_iter = cycle(dataloader)
+    train_dataloader, test_dataloader = split_dataset_random(dataset=dataset, train_ratio=0.8, cfg=cfg)
+    dl_iter = cycle(train_dataloader)
 
     policy.train()
 
     train_metrics = {
-        "loss": AverageMeter("loss", ":.3f"),
+        "total_loss": AverageMeter("total_loss", ":.3f"),
+        "kld_loss": AverageMeter("kld_loss", ":.3f"),
+        "l1_loss": AverageMeter("l1_loss", ":.3f"),
         "grad_norm": AverageMeter("grdn", ":.3f"),
         "lr": AverageMeter("lr", ":0.1e"),
         "update_s": AverageMeter("updt_s", ":.3f"),
         "dataloading_s": AverageMeter("data_s", ":.3f"),
+        "eval_loss": AverageMeter("eval_loss", ":.3f")
     }
+    if type(policy) == ConceptACTPolicy:
+        add_train_metrics = {
+            "concept_loss": AverageMeter("concept_loss", ":.3f"),
+            "normal_loss": AverageMeter("normal_loss", ":.3f"),
+
+        }
+        train_metrics.update(add_train_metrics)
 
     train_tracker = MetricsTracker(
         cfg.batch_size, dataset.num_frames, dataset.num_episodes, train_metrics, initial_step=step
@@ -230,6 +305,8 @@ def train(cfg: TrainPipelineConfig):
         is_eval_step = cfg.eval_freq > 0 and step % cfg.eval_freq == 0
 
         if is_log_step:
+            eval_loss = validataion_loss_eval(policy, test_dataloader)
+            train_tracker.eval_loss = eval_loss
             logging.info(train_tracker)
             if wandb_logger:
                 wandb_log_dict = train_tracker.to_dict()
