@@ -160,15 +160,6 @@ class ACTConfig(PreTrainedConfig):
             raise ValueError(
                 f"Multiple observation steps not handled yet. Got `nobs_steps={self.n_obs_steps}`"
             )
-        if self.use_concept_learning and self.concept_method not in ["prediction_head", "transformer"]:
-            raise ValueError(
-                f"Concept method must be one of 'prediction_head' or 'transformer'. Got {self.concept_method}."
-            )
-        if self.use_concept_learning and self.concept_method == "prediction_head" and not self.concept_types:
-            raise ValueError(
-                "When using concept learning with 'prediction_head' method, concept_types must be provided."
-            )
-
     def get_optimizer_preset(self) -> AdamWConfig:
         return AdamWConfig(
             lr=self.optimizer_lr,
