@@ -7,9 +7,11 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 HF_USER=$(huggingface-cli whoami | head -n 1)
 echo "Logged in as: $HF_USER"
 
-OUTPUT_DIR="outputs/train/act_normal_so100"
-JOB_NAME="act_normal_so100"
+BASE_OUTPUT_DIR="outputs/train/act_normal_so100"
+BASE_JOB_NAME="act_normal_so100"
 
+# Random seeds to loop over
+SEEDS=(42 123 456)
 
 echo "Collecting Datasets"
 # List directories, grep for _simple, and remove trailing slashes
@@ -29,28 +31,40 @@ done
 echo "Dataset list: $DATASET_LIST"
 ENABLE_WANDB=true  # Set to true to enable Weights & Biases logging
 
-# Set up wandb flag
-WANDB_FLAG="--wandb.enable=false"
-if [ "$ENABLE_WANDB" = true ]; then
-    WANDB_FLAG="--wandb.enable=true --wandb.disable_artifact=false --wandb.run_id=${JOB_NAME}"
-    echo "Weights & Biases logging enabled"
-fi
-
-
 LEARNING_RATE=1e-5
 BATCH_SIZE=8
 STEPS=25000
 
+# Loop over each seed
+for SEED in "${SEEDS[@]}"; do
+  echo "Starting training with seed $SEED"
+  
+  # Update job name and output directory to include seed
+  JOB_NAME="${BASE_JOB_NAME}_seed${SEED}"
+  OUTPUT_DIR="${BASE_OUTPUT_DIR}_seed${SEED}"
+  
+  # Set up wandb flag
+  WANDB_FLAG="--wandb.enable=false"
+  if [ "$ENABLE_WANDB" = true ]; then
+      WANDB_FLAG="--wandb.enable=true --wandb.disable_artifact=false --wandb.run_id=${JOB_NAME}"
+      echo "Weights & Biases logging enabled"
+  fi
 
-echo "Training"
-python lerobot/scripts/train.py \
-  --dataset.repo_id=$DATASET_LIST \
-  --policy.type=act \
-  --output_dir=${OUTPUT_DIR} \
-  --job_name=${JOB_NAME} \
-  --policy.device=cuda \
-  --policy.optimizer_lr=$LEARNING_RATE \
-  --batch_size=$BATCH_SIZE \
-  --steps=$STEPS \
-  --log_freq=1000 \
-  $WANDB_FLAG
+  echo "Training with seed $SEED"
+  python lerobot/scripts/train.py \
+    --dataset.repo_id=$DATASET_LIST \
+    --policy.type=act \
+    --output_dir=${OUTPUT_DIR} \
+    --job_name=${JOB_NAME} \
+    --policy.device=cuda \
+    --policy.optimizer_lr=$LEARNING_RATE \
+    --batch_size=$BATCH_SIZE \
+    --steps=$STEPS \
+    --log_freq=1000 \
+    --seed=$SEED \
+    $WANDB_FLAG
+    
+  echo "Completed training with seed $SEED"
+done
+
+echo "All training runs completed!"

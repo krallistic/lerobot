@@ -2,9 +2,12 @@
 
 # Configuration variables
 DATASET_PREFIX="individual_cases_simple_with_concepts"
-OUTPUT_DIR="outputs/train/concept_act_so100"
-JOB_NAME="concept_act_so100"
+BASE_OUTPUT_DIR="outputs/train/concept_act_so100"
+BASE_JOB_NAME="concept_act_so100"
 DEVICE="cuda"  # Use "cuda" for GPU or "cpu" for CPU
+
+# Random seeds to loop over
+SEEDS=(42 123 456)
 
 CONCEPT_WEIGHT=1.0  # Weight for concept loss component
 ENABLE_WANDB=true  # Set to true to enable Weights & Biases logging
@@ -33,30 +36,43 @@ done
 
 echo "Dataset list: $DATASET_LIST"
 
-# Set up wandb flag
-WANDB_FLAG="--wandb.enable=false"
-if [ "$ENABLE_WANDB" = true ]; then
-    WANDB_FLAG="--wandb.enable=true --wandb.disable_artifact=false --wandb.run_id=${JOB_NAME}"
-    echo "Weights & Biases logging enabled"
-fi
 LEARNING_RATE=1e-5
 BATCH_SIZE=8
 STEPS=25000
 
-echo "Starting training with ConceptACT policy"
-python lerobot/scripts/train.py \
-    --dataset.repo_id=$DATASET_LIST \
-    --policy.type=concept_act \
-    --output_dir=$OUTPUT_DIR \
-    --job_name=$JOB_NAME \
-    --policy.device=$DEVICE \
-    --policy.concept_weight=$CONCEPT_WEIGHT \
-    --policy.optimizer_lr=$LEARNING_RATE \
-    --batch_size=$BATCH_SIZE \
-    --steps=$STEPS \
-    --policy.use_concept_learning=true \
-    --policy.concept_method=prediction_head \
-    --log_freq=1000 \
-    $WANDB_FLAG
+# Loop over each seed
+for SEED in "${SEEDS[@]}"; do
+  echo "Starting training with seed $SEED"
+  
+  # Update job name and output directory to include seed
+  JOB_NAME="${BASE_JOB_NAME}_seed${SEED}"
+  OUTPUT_DIR="${BASE_OUTPUT_DIR}_seed${SEED}"
+  
+  # Set up wandb flag
+  WANDB_FLAG="--wandb.enable=false"
+  if [ "$ENABLE_WANDB" = true ]; then
+      WANDB_FLAG="--wandb.enable=true --wandb.disable_artifact=false --wandb.run_id=${JOB_NAME}"
+      echo "Weights & Biases logging enabled"
+  fi
 
-echo "Training completed!" 
+  echo "Starting training with ConceptACT policy using seed $SEED"
+  python lerobot/scripts/train.py \
+      --dataset.repo_id=$DATASET_LIST \
+      --policy.type=concept_act \
+      --output_dir=$OUTPUT_DIR \
+      --job_name=$JOB_NAME \
+      --policy.device=$DEVICE \
+      --policy.concept_weight=$CONCEPT_WEIGHT \
+      --policy.optimizer_lr=$LEARNING_RATE \
+      --batch_size=$BATCH_SIZE \
+      --steps=$STEPS \
+      --policy.use_concept_learning=true \
+      --policy.concept_method=prediction_head \
+      --log_freq=1000 \
+      --seed=$SEED \
+      $WANDB_FLAG
+      
+  echo "Completed training with seed $SEED"
+done
+
+echo "All training runs completed!" 
