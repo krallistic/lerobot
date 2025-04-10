@@ -120,9 +120,10 @@ def validataion_loss_eval(policy: PreTrainedPolicy, dataloader: torch.utils.data
             if isinstance(batch[key], torch.Tensor):
                 batch[key] = batch[key].to(policy.config.device, non_blocking=True)
         with torch.autocast(device_type=policy.config.device) if False else nullcontext():
-            loss, _ = policy.forward(batch)
+            loss, output_dict = policy.forward(batch)
+            eval_loss = output_dict['l1_loss'] + output_dict['kld_loss']
 
-        loss_cumsum += loss.item()
+        loss_cumsum += eval_loss
         n_examples_evaluated += batch["index"].shape[0]
 
     # Calculate the average loss over the validation set.

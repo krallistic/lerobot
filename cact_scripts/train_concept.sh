@@ -5,9 +5,7 @@ DATASET_PREFIX="individual_cases_simple_with_concepts"
 OUTPUT_DIR="outputs/train/concept_act_so100"
 JOB_NAME="concept_act_so100"
 DEVICE="cuda"  # Use "cuda" for GPU or "cpu" for CPU
-LEARNING_RATE=1e-5
-BATCH_SIZE=16
-STEPS=25000
+
 CONCEPT_WEIGHT=1.0  # Weight for concept loss component
 ENABLE_WANDB=true  # Set to true to enable Weights & Biases logging
 
@@ -41,6 +39,9 @@ if [ "$ENABLE_WANDB" = true ]; then
     WANDB_FLAG="--wandb.enable=true --wandb.disable_artifact=false --wandb.run_id=${JOB_NAME}"
     echo "Weights & Biases logging enabled"
 fi
+LEARNING_RATE=1e-5
+BATCH_SIZE=8
+STEPS=25000
 
 echo "Starting training with ConceptACT policy"
 python lerobot/scripts/train.py \
