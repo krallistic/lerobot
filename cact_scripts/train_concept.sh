@@ -2,8 +2,10 @@
 
 # Configuration variables
 DATASET_PREFIX="individual_cases_simple_with_concepts"
-BASE_OUTPUT_DIR="outputs/train/concept_act_so100"
-BASE_JOB_NAME="concept_act_so100"
+
+
+BASE_JOB_NAME="concept_act_so100_higherlr1e4"
+BASE_OUTPUT_DIR="outputs/train/${BASE_JOB_NAME}"
 DEVICE="cuda"  # Use "cuda" for GPU or "cpu" for CPU
 
 # Random seeds to loop over
@@ -36,9 +38,9 @@ done
 
 echo "Dataset list: $DATASET_LIST"
 
-LEARNING_RATE=1e-5
+LEARNING_RATE=1e-4
 BATCH_SIZE=8
-STEPS=25000
+STEPS=100000
 
 # Loop over each seed
 for SEED in "${SEEDS[@]}"; do
@@ -67,8 +69,8 @@ for SEED in "${SEEDS[@]}"; do
       --batch_size=$BATCH_SIZE \
       --steps=$STEPS \
       --policy.use_concept_learning=true \
-      --policy.concept_method=prediction_head \
-      --log_freq=1000 \
+      --policy.concept_method=transformer \
+      --log_freq=2000 \
       --seed=$SEED \
       $WANDB_FLAG
       

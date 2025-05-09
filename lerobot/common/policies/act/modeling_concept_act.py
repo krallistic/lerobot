@@ -1,11 +1,11 @@
-from lerobot.common.policies.act.modeling_act import ACTPolicy, ACT, ACTDecoder, ACTEncoder
+from lerobot.common.policies.act.modeling_act import ACTPolicy, ACT, ACTDecoder, ACTEncoder, get_activation_fn
 from lerobot.common.policies.act.configuration_concept_act import ConceptACTConfig
 import torch
 from torch import Tensor, nn
 import einops
 import torch.nn.functional as F  # noqa: N812
-
-
+from typing import Tuple
+import math
 class ConceptACTPolicy(ACTPolicy):
     """ACT Policy with concept learning capabilities.
     
@@ -25,9 +25,10 @@ class ConceptACTPolicy(ACTPolicy):
         
         # Initialize parent class
         super().__init__(config=config, dataset_stats=dataset_stats)
-        
+        self.config = config
         # Replace the standard ACT model with our ConceptACT model
         self.model = ConceptACT(config)
+        #self.model = torch.compile(model=ConceptACT(config))
 
         # Set up concept normalization if concept learning is enabled
         if "concept" in dataset_stats:
@@ -68,31 +69,36 @@ class ConceptACTPolicy(ACTPolicy):
         # Add concept loss if concept learning is enabled
         if self.config.use_concept_learning and self.config.concept_method == "prediction_head":
             concept_loss = 0.0
-            
+
             # Calculate cross-entropy loss for each concept type defined in config
             for concept_type in self.config.concept_types.keys():
                 if concept_type in batch and concept_type in concepts_hat:
                     # Get the predicted logits and true one-hot encoding
                     logits = concepts_hat[concept_type]
                     targets = batch[concept_type]
-                    
+
                     # Calculate cross-entropy loss (assuming targets are one-hot encoded)
                     # For one-hot targets, we need to convert to class indices for cross-entropy
                     if targets.dim() > 1 and targets.shape[-1] > 1:  # One-hot encoded
                         targets = targets.argmax(dim=-1)
-                        
+
                     # Add cross-entropy loss for this concept type
                     ce_loss = F.cross_entropy(logits, targets)
                     concept_loss += ce_loss
                     loss_dict[f"{concept_type}_loss"] = ce_loss.item()
-            
+
             # Add the total concept loss to the overall loss
             loss_dict["concept_loss"] = concept_loss.item()
             total_loss = total_loss + concept_loss * self.config.concept_weight
-            
+
         elif self.config.use_concept_learning and self.config.concept_method == "transformer":
             # For transformer method, keep the existing MSE loss implementation
-            concept_loss = F.mse_loss(batch["observation.concept"], concepts_hat)
+            # TODO add NORM loss
+
+            target_concepts = torch.concatenate([batch[key] for key, value in sorted(self.config.concept_types.items())], dim=-1).float()
+            # Calculate Frobenius norm (equivalent to MSE loss over the matrices)
+            # ||A - H||^2_F
+            concept_loss = F.mse_loss(concepts_hat, target_concepts, reduction='mean')
             loss_dict["concept_loss"] = concept_loss.item()
             total_loss = total_loss + concept_loss * self.config.concept_weight
         elif self.config.use_concept_learning:
@@ -148,95 +154,8 @@ class ConceptACTPolicy(ACTPolicy):
         return self._action_queue.popleft()
 
 
-class ConceptTransformer(nn.Module):
-    """A transformer-based concept learning module for predicting concepts from encoded features.
-    
-    This module uses a transformer architecture to extract and predict concepts from the 
-    encoded features. It works by:
-    1. Using a learnable concept query token
-    2. Running it through a transformer decoder that attends to the encoded features
-    3. Projecting the resulting representation to the concept space
-    
-    This approach is inspired by the DETR (DEtection TRansformer) architecture, which uses
-    object queries to attend to relevant parts of the image features for object detection.
-    """
-    
-    def __init__(self, config: ConceptACTConfig):
-        """Initialize the ConceptTransformer.
-        
-        Args:
-            config: Configuration for the transformer-based concept learning.
-        """
-        super().__init__()
-        
-        # Encoder to process the input tokens
-        self.encoder = ACTEncoder(config)
-        
-        # Learnable concept query token (similar to DETR's object queries)
-        # This query will attend to relevant parts of the encoder output
-        self.concept_query = nn.Parameter(torch.randn(1, 1, config.dim_model))
-        
-        # Decoder for extracting concept-relevant information through cross-attention
-        self.decoder = ACTDecoder(config)
-        
-        # Final projection layer to map from hidden dimension to concept space
-        self.concept_head = nn.Linear(config.dim_model, config.concept_dim)
-        
-        # Initialize parameters
-        self._reset_parameters()
-    
-    def _reset_parameters(self):
-        """Initialize the parameters of the transformer with Xavier uniform distribution."""
-        for p in self.parameters():
-            if p.dim() > 1:
-                nn.init.xavier_uniform_(p)
-    
-    def forward(self, encoder_out: Tensor, encoder_pos_embed: Tensor) -> Tensor:
-        """Process the encoder outputs to predict concepts.
-        
-        Args:
-            encoder_out: Output features from the encoder, shape (seq_len, batch_size, dim_model)
-            encoder_pos_embed: Positional embeddings for the encoder, shape (seq_len, batch_size, dim_model)
-            
-        Returns:
-            Predicted concepts with shape (batch_size, concept_dim)
-        """
-        batch_size = encoder_out.shape[1]
-        
-        # Expand the concept query to match the batch size
-        # The concept query acts as a learnable prompt that attends to relevant features
-        query = self.concept_query.expand(1, batch_size, -1)  # Shape: (1, batch_size, dim_model)
-        
-        # Use the decoder to attend to relevant parts of the encoder output
-        # The decoder performs cross-attention between the query and encoder outputs
-        decoder_out = self.decoder(
-            query,                        # Concept query as input
-            encoder_out,                  # Encoder outputs to attend to
-            encoder_pos_embed=encoder_pos_embed,  # Positional embeddings for encoder outputs
-            decoder_pos_embed=None        # No positional embedding for the single query token
-        )
-        
-        # Project decoder output to concept space
-        # Take the first (and only) token from the decoder output and project it
-        concepts = self.concept_head(decoder_out[0])  # Shape: (batch_size, concept_dim)
-        
-        return concepts
 
 
-"""
-Options to include concepts:
-- Into VAE - INTO VAE is not a good idea because the VAE does not see the images as inputs, so it cant learn features like color.
-    - Normal inputs to VAE, no extra loss.
-    - Output to VAE, loss on difference. Prediction time 
-    - Concept Transformer on the Attention in the ACTEncoderLayer (has usually 4 layers of ACTEncoderLayer, each with a MultiheadAttention
-- Into Encoder - Last layer of attention as concept attention:
-    - concept transformer: Usually 4 layers of attention.
-    - Prediction outputs.
-- Into Decoder - Downside of decoder is that is has only the latent representation as the input...:
-    - concept transformer: Usually only 1 layers 
-    - Prediction outputs.
-
-"""
 class ConceptACT(ACT):
     """Action Chunking Transformer with concept learning capabilities.
     
@@ -246,18 +165,10 @@ class ConceptACT(ACT):
     """
     def __init__(self, config: ConceptACTConfig):
         super().__init__(config)
+        self.config = config
+        self.encoder = ConceptACTEncoder(config)
         
-        # Add components for concept learning if enabled
-        if config.use_concept_learning:
-            if config.concept_method == "prediction_head":
-                # Create prediction heads for each concept type defined in config
-                self.concept_heads = nn.ModuleDict({
-                    concept_name: nn.Linear(config.dim_model, num_classes)
-                    for concept_name, num_classes in config.concept_types.items()
-                })
-            elif config.concept_method == "transformer":
-                # Create a transformer-based concept learning module
-                self.concept_transformer = ConceptTransformer(config)
+
 
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, tuple[Tensor, Tensor] | tuple[None, None], dict[str, Tensor] | None]:
@@ -270,7 +181,8 @@ class ConceptACT(ACT):
             actions: (B, chunk_size, action_dim) batch of action sequences
             latent_params: Tuple containing the latent PDF's parameters (mean, log(σ²)) 
                            both as (B, L) tensors where L is the latent dimension.
-            concepts: Dictionary of predicted concepts with one-hot encodings for each concept type,
+            concepts: Dictionary of predicted concepts with one-hot encodings for each concept type if concept learning is enabled and prediction head mode,
+                      (B, num_concepts) if Concept Transformer is enables
                      or None if concept learning is disabled.
         """
         # -------------------- 1. Process inputs and prepare batch --------------------
@@ -374,26 +286,16 @@ class ConceptACT(ACT):
         encoder_in_tokens = torch.stack(encoder_in_tokens, axis=0)
         encoder_in_pos_embed = torch.stack(encoder_in_pos_embed, axis=0)
 
+
         # -------------------- 4. Forward pass through transformer --------------------
-        # Encode features
-        encoder_out = self.encoder(encoder_in_tokens, pos_embed=encoder_in_pos_embed)
-        
-        # -------------------- 5. Concept prediction (if enabled) --------------------
-        concepts = None
+
         if self.config.use_concept_learning:
-            if self.config.concept_method == "prediction_head":
-                # Use first token from encoder output to predict concepts
-                concept_token = encoder_out[0]  # Shape: (batch_size, dim_model)
-                
-                # Create dictionary of predictions for each concept type
-                concepts = {}
-                for concept_name, head in self.concept_heads.items():
-                    # Each head outputs logits for its concept type
-                    concepts[concept_name] = head(concept_token)
-            elif self.config.concept_method == "transformer":
-                # Use transformer-based concept learning
-                concepts = self.concept_transformer(encoder_out, encoder_in_pos_embed)
-        
+            encoder_out, concepts = self.encoder(encoder_in_tokens, pos_embed=encoder_in_pos_embed)
+        else:
+            encoder_out = self.encoder(encoder_in_tokens, pos_embed=encoder_in_pos_embed)
+
+        # 5 was concept prediction, now in 4
+
         # -------------------- 6. Action prediction --------------------
         # Prepare decoder input (zeros initialized)
         decoder_in = torch.zeros(
@@ -419,3 +321,184 @@ class ConceptACT(ACT):
             return actions, (mu, log_sigma_x2), concepts
         else:
             return actions, (mu, log_sigma_x2)
+
+class ConceptACTEncoderLayer(nn.Module):
+    """
+    Encoder layer that incorporates concept learning via a parallel pathway.
+    Uses the entire input sequence as query for concept attention.
+    """
+    def __init__(self, config):
+        super().__init__()
+        # Standard self-attention as in ACTEncoderLayer
+        self.self_attn = nn.MultiheadAttention(config.dim_model, config.n_heads, dropout=config.dropout)
+
+        # Concept learning components
+
+        self.n_concepts = sum([value for key, value in config.concept_types.items()])
+
+        # Learnable concepts
+        self.concepts = nn.Parameter(torch.zeros(1, self.n_concepts, config.dim_model))
+        nn.init.trunc_normal_(self.concepts, std=1.0 / math.sqrt(config.dim_model))
+
+        # Cross-attention for concept pathway
+        self.concept_attn = nn.MultiheadAttention(
+            config.dim_model, config.n_heads, dropout=config.dropout
+        )
+
+        # Projection layer after concatenation
+        self.concept_proj = nn.Linear(config.dim_model * 2, config.dim_model)
+
+        # Standard feed-forward network as in ACTEncoderLayer
+        self.linear1 = nn.Linear(config.dim_model, config.dim_feedforward)
+        self.dropout = nn.Dropout(config.dropout)
+        self.linear2 = nn.Linear(config.dim_feedforward, config.dim_model)
+
+        # Layer normalization and dropout layers
+        self.norm1 = nn.LayerNorm(config.dim_model)
+        self.norm2 = nn.LayerNorm(config.dim_model)
+        self.dropout1 = nn.Dropout(config.dropout)
+        self.dropout2 = nn.Dropout(config.dropout)
+
+        # From original ACTEncoderLayer
+        self.activation = get_activation_fn(config.feedforward_activation)
+        self.pre_norm = config.pre_norm
+    def forward(self, x, pos_embed=None, key_padding_mask=None):
+        """
+        Forward pass with concept learning pathway.
+
+        Args:
+            x: Input tensor (seq_len, batch_size, dim_model)
+            pos_embed: Positional embeddings
+            key_padding_mask: Padding mask for attention
+
+        Returns:
+            x: Output tensor (seq_len, batch_size, dim_model)
+            concept_attn: Attention scores over concepts (optional, if n_concepts > 0)
+        """
+        skip = x
+        if self.pre_norm:
+            x = self.norm1(x)
+
+        # Self-attention pathway (same as original)
+        q = k = x if pos_embed is None else x + pos_embed
+        x_self_attn = self.self_attn(q, k, value=x, key_padding_mask=key_padding_mask)[0]
+
+        # If using concepts, add the concept pathway
+        # Get batch size from x
+        seq_len, batch_size, dim = x.shape
+
+        # Expand concepts to match batch size
+        concepts = self.concepts.expand(batch_size, -1, -1).transpose(0, 1)  # (n_concepts, batch_size, dim)
+
+        # Cross-attention between the entire input sequence and concepts
+        # Using the entire x as query
+        x_concept, concept_attn = self.concept_attn(
+            query=q,  # Use the same query as in self-attention (with pos_embed if provided)
+            key=concepts,
+            value=concepts
+        )
+
+        # Concatenate the self-attention output with concept output along feature dimension
+        x_combined = torch.cat([x_self_attn, x_concept], dim=-1)
+
+        # Project back to original dimension
+        x = self.concept_proj(x_combined)
+
+
+        # Add residual connection and normalization
+        x = skip + self.dropout1(x)
+        if self.pre_norm:
+            skip = x
+            x = self.norm2(x)
+        else:
+            x = self.norm1(x)
+            skip = x
+
+        # Feed-forward network (same as original)
+        x = self.linear2(self.dropout(self.activation(self.linear1(x))))
+        x = skip + self.dropout2(x)
+        if not self.pre_norm:
+            x = self.norm2(x)
+
+        if self.n_concepts > 0:
+            return x, concept_attn
+        else:
+            return x
+
+from lerobot.common.policies.act.modeling_act import ACTEncoderLayer
+class ConceptACTEncoder(nn.Module):
+    """Convenience module for running multiple encoder layers, maybe followed by normalization."""
+
+    def __init__(self, config: ConceptACTConfig, is_vae_encoder: bool = False):
+        super().__init__()
+        self.config = config
+        self.is_vae_encoder = is_vae_encoder
+        self.use_concepts = getattr(config, "n_concepts", 0) > 0
+
+        # Determine number of layers
+        num_layers = config.n_vae_encoder_layers if self.is_vae_encoder else config.n_encoder_layers
+        self.layers = nn.ModuleList([ACTEncoderLayer(config) for _ in range(num_layers - 1)])
+
+        # Add components for concept learning if enabled
+        if config.use_concept_learning:
+            if config.concept_method == "prediction_head":
+
+
+                # We append an IdentyLayer so we can share more code with the ConceptTransformer Approach.
+                self.layers.append(nn.Identity())
+
+                # Create prediction heads for each concept type defined in config
+                self.concept_heads = nn.ModuleDict({
+                    concept_name: nn.Sequential(
+                        nn.Linear(config.dim_model, config.concept_dim),
+                        nn.ReLU(),  # Add non-linearity between layers
+                        nn.Dropout(p=0.2),
+                        nn.Linear(config.concept_dim, num_classes)
+                    )
+                    for concept_name, num_classes in sorted(config.concept_types.items())
+                })
+            elif config.concept_method == "transformer":
+                # Create a transformer-based concept learning module
+                if num_layers > 1:
+                    # Add concept layer as the final layer
+                    self.layers.append(ConceptACTEncoderLayer(config))
+                else:
+                    # If only one layer, make it a concept layer
+                    self.layers = nn.ModuleList([ConceptACTEncoderLayer(config)])
+            else:
+                raise "Unknown concept method"
+
+
+        self.norm = nn.LayerNorm(config.dim_model) if config.pre_norm else nn.Identity()
+
+    def forward(
+            self, x: Tensor, pos_embed: Tensor | None = None, key_padding_mask: Tensor | None = None
+    ) -> Tensor | Tuple[Tensor, Tensor]:
+        concept_attn = None
+
+        # Process through all layers except potentially the last concept layer
+        for i in range(len(self.layers) - 1):
+            x = self.layers[i](x, pos_embed=pos_embed, key_padding_mask=key_padding_mask)
+        if self.config.concept_method == "prediction_head":
+            # Use first token from encoder output to predict concepts
+            concept_token = x[0]  # Shape: (batch_size, dim_model)
+
+            # Create dictionary of predictions for each concept type
+            concepts_dict = {}
+            for concept_name, head in self.concept_heads.items():
+                # Each head outputs logits for its concept type
+                concepts_dict[concept_name] = head(concept_token)
+
+            #concepts = torch.concatenate([value for key, value in sorted(concepts_dict)], dim=-1)
+            concepts = concepts_dict
+        elif self.config.concept_method == "transformer":
+            # Process the last layer, which is a concept layer
+            last_layer = self.layers[-1]
+            x, concepts = last_layer(x, pos_embed=pos_embed, key_padding_mask=key_padding_mask)
+            if self.config.n_heads > 1:
+                concepts = concepts.mean(1) # Dim 1 should be the Head dimensions
+        x = self.norm(x)
+
+        if concepts is not None:
+            return x, concepts
+        return x
