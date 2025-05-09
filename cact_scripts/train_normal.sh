@@ -7,8 +7,8 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 HF_USER=$(huggingface-cli whoami | head -n 1)
 echo "Logged in as: $HF_USER"
 
-BASE_OUTPUT_DIR="outputs/train/act_normal_so100"
-BASE_JOB_NAME="act_normal_so100"
+BASE_JOB_NAME="act_normal_so100_more_data"
+BASE_OUTPUT_DIR="outputs/train/${BASE_JOB_NAME}"
 
 # Random seeds to loop over
 SEEDS=(42 123 456)
@@ -33,7 +33,7 @@ ENABLE_WANDB=true  # Set to true to enable Weights & Biases logging
 
 LEARNING_RATE=1e-5
 BATCH_SIZE=8
-STEPS=25000
+STEPS=100000
 
 # Loop over each seed
 for SEED in "${SEEDS[@]}"; do

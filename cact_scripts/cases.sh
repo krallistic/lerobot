@@ -73,7 +73,7 @@ process_case() {
           --control.reset_time_s=20 \
           --control.num_episodes=3 \
           --control.push_to_hub=false \
-          --control.resume=false
+          --control.resume=true
     python lerobot/scripts/say.py "Done"
     return 0  # Count this case
   elif [ "$mode" = "test" ] && [ "$is_test" = "true" ]; then

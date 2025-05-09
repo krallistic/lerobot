@@ -102,20 +102,20 @@ class ConceptACTConfig(ACTConfig):
             "VISUAL": NormalizationMode.MEAN_STD,
             "STATE": NormalizationMode.MEAN_STD,
             "ACTION": NormalizationMode.MEAN_STD,
-            "CONCEPT": NormalizationMode.MEAN_STD,
+            "CONCEPT": NormalizationMode.IDENTITY,
         }
     )
 
     # Concept learning.
     use_concept_learning: bool = False
     concept_method: str = "prediction_head"  # Options: "prediction_head", "transformer"
-    concept_dim: int = 32
+    concept_dim: int = 128
     concept_weight: float = 1.0
     concept_types: dict = field(
         default_factory=lambda: {
             "concept_color": 4,  # red, green, yellow, blue
             "concept_shape": 3,  # cube, rectangle, cylinder
-            "concept_location": 5,  # 1, 2, 3, 4, 5
+            #"concept_location": 5,  # 1, 2, 3, 4, 5
             "concept_dropoff": 2,  # A, B
         }
     )

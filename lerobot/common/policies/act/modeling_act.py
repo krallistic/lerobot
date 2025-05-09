@@ -82,6 +82,7 @@ class ACTPolicy(PreTrainedPolicy):
     def get_optim_params(self) -> dict:
         # TODO(aliberts, rcadene): As of now, lr_backbone == lr
         # Should we remove this and just `return self.parameters()`?
+        return self.parameters()
         return [
             {
                 "params": [

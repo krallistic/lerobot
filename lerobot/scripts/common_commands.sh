@@ -10,6 +10,9 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 HF_USER=$(huggingface-cli whoami | head -n 1)
 
 
+sudo chmod a+rw /dev/ttyACM0 2>/dev/null || true
+sudo chmod a+rw /dev/ttyACM1 2>/dev/null || true
+
 python lerobot/scripts/find_motors_bus_port.py
 
 python lerobot/scripts/control_robot.py \
@@ -51,6 +54,14 @@ python lerobot/scripts/control_robot.py \
   --policy.device=cuda \
   --wandb.enable=false
 
+
+python lerobot/scripts/visualize_dataset_html.py \
+  --repo-id ${HF_USER}/so100_individual_cases_simple_with_concepts_blue-cylinder-2-B 
+
+
+
+python lerobot/scripts/visualize_dataset_html.py \
+  --repo-id ${HF_USER}/so100_individual_cases_simple_blue-cylinder-2-B 
 
   python lerobot/scripts/control_robot.py \
   --robot.type=so100 \
