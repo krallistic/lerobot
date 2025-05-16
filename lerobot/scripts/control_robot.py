@@ -313,6 +313,8 @@ def record(
         ):
             log_say("Reset the environment", cfg.play_sounds)
             reset_environment(robot, events, cfg.reset_time_s, cfg.fps)
+            if policy is not None:
+                policy.reset()
             log_say("Done reset the environment", cfg.play_sounds)
 
         if events["rerecord_episode"]:

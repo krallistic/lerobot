@@ -7,7 +7,7 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 HF_USER=$(huggingface-cli whoami | head -n 1)
 echo "Logged in as: $HF_USER"
 
-BASE_JOB_NAME="act_normal_so100_more_data"
+BASE_JOB_NAME="act_normal_so100_more_heads"
 BASE_OUTPUT_DIR="outputs/train/${BASE_JOB_NAME}"
 
 # Random seeds to loop over
@@ -46,7 +46,7 @@ for SEED in "${SEEDS[@]}"; do
   # Set up wandb flag
   WANDB_FLAG="--wandb.enable=false"
   if [ "$ENABLE_WANDB" = true ]; then
-      WANDB_FLAG="--wandb.enable=true --wandb.disable_artifact=false --wandb.run_id=${JOB_NAME}"
+      WANDB_FLAG="--wandb.enable=true --wandb.disable_artifact=true --wandb.run_id=${JOB_NAME}"
       echo "Weights & Biases logging enabled"
   fi
 
@@ -60,7 +60,8 @@ for SEED in "${SEEDS[@]}"; do
     --policy.optimizer_lr=$LEARNING_RATE \
     --batch_size=$BATCH_SIZE \
     --steps=$STEPS \
-    --log_freq=1000 \
+    --policy.n_heads=16 \
+    --log_freq=2000 \
     --seed=$SEED \
     $WANDB_FLAG
     
