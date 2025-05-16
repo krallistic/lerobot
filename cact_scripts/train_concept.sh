@@ -4,14 +4,14 @@
 DATASET_PREFIX="individual_cases_simple_with_concepts"
 
 
-BASE_JOB_NAME="concept_act_so100_higherlr1e4"
+BASE_JOB_NAME="concept_act_so100_transformer_ce_lower_concept_weight"
 BASE_OUTPUT_DIR="outputs/train/${BASE_JOB_NAME}"
 DEVICE="cuda"  # Use "cuda" for GPU or "cpu" for CPU
 
 # Random seeds to loop over
 SEEDS=(42 123 456)
 
-CONCEPT_WEIGHT=1.0  # Weight for concept loss component
+CONCEPT_WEIGHT=0.1  # Weight for concept loss component
 ENABLE_WANDB=true  # Set to true to enable Weights & Biases logging
 
 # Set library path to include conda environment libraries
@@ -38,7 +38,7 @@ done
 
 echo "Dataset list: $DATASET_LIST"
 
-LEARNING_RATE=1e-4
+LEARNING_RATE=3e-5
 BATCH_SIZE=8
 STEPS=100000
 
@@ -53,7 +53,7 @@ for SEED in "${SEEDS[@]}"; do
   # Set up wandb flag
   WANDB_FLAG="--wandb.enable=false"
   if [ "$ENABLE_WANDB" = true ]; then
-      WANDB_FLAG="--wandb.enable=true --wandb.disable_artifact=false --wandb.run_id=${JOB_NAME}"
+      WANDB_FLAG="--wandb.enable=true --wandb.disable_artifact=true --wandb.run_id=${JOB_NAME}"
       echo "Weights & Biases logging enabled"
   fi
 
@@ -69,7 +69,8 @@ for SEED in "${SEEDS[@]}"; do
       --batch_size=$BATCH_SIZE \
       --steps=$STEPS \
       --policy.use_concept_learning=true \
-      --policy.concept_method=transformer \
+      --policy.concept_method=transformer_ce \
+      --policy.n_heads=16 \
       --log_freq=2000 \
       --seed=$SEED \
       $WANDB_FLAG

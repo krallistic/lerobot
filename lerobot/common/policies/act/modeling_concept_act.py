@@ -91,6 +91,29 @@ class ConceptACTPolicy(ACTPolicy):
             loss_dict["concept_loss"] = concept_loss.item()
             total_loss = total_loss + concept_loss * self.config.concept_weight
 
+        elif self.config.use_concept_learning and self.config.concept_method == "transformer_ce":
+            # For transformer method, keep the existing MSE loss implementation
+            # TODO add NORM loss
+            start = 0
+            concept_loss = 0.0
+
+            for concept_class in self.config.concept_types.keys():
+                targets = batch[concept_class]
+
+                current_concept_class_size = targets.shape[-1]
+                current_concept_class_hat = concepts_hat[:, start:start+current_concept_class_size]
+
+                # Calculate cross-entropy loss (assuming targets are one-hot encoded)
+                # For one-hot targets, we need to convert to class indices for cross-entropy
+                if targets.dim() > 1 and targets.shape[-1] > 1:  # One-hot encoded
+                    targets = targets.argmax(dim=-1)
+                ce_loss = F.cross_entropy(current_concept_class_hat,  targets)
+                concept_loss += ce_loss
+
+                start = start + current_concept_class_size
+
+            loss_dict["concept_loss"] = concept_loss.item()
+            total_loss = total_loss + concept_loss * self.config.concept_weight
         elif self.config.use_concept_learning and self.config.concept_method == "transformer":
             # For transformer method, keep the existing MSE loss implementation
             # TODO add NORM loss
@@ -330,7 +353,7 @@ class ConceptACTEncoderLayer(nn.Module):
     def __init__(self, config):
         super().__init__()
         # Standard self-attention as in ACTEncoderLayer
-        self.self_attn = nn.MultiheadAttention(config.dim_model, config.n_heads, dropout=config.dropout)
+        self.self_attn = nn.MultiheadAttention(config.dim_model, config.n_heads * 2, dropout=config.dropout)
 
         # Concept learning components
 
@@ -342,7 +365,7 @@ class ConceptACTEncoderLayer(nn.Module):
 
         # Cross-attention for concept pathway
         self.concept_attn = nn.MultiheadAttention(
-            config.dim_model, config.n_heads, dropout=config.dropout
+            config.dim_model, config.n_heads * 2, dropout=config.dropout
         )
 
         # Projection layer after concatenation
@@ -431,11 +454,14 @@ class ConceptACTEncoder(nn.Module):
 
     def __init__(self, config: ConceptACTConfig, is_vae_encoder: bool = False):
         super().__init__()
+        assert is_vae_encoder is False # Should not be used as a VAE Encode
+
         self.config = config
         self.is_vae_encoder = is_vae_encoder
         self.use_concepts = getattr(config, "n_concepts", 0) > 0
 
         # Determine number of layers
+
         num_layers = config.n_vae_encoder_layers if self.is_vae_encoder else config.n_encoder_layers
         self.layers = nn.ModuleList([ACTEncoderLayer(config) for _ in range(num_layers - 1)])
 
@@ -457,7 +483,7 @@ class ConceptACTEncoder(nn.Module):
                     )
                     for concept_name, num_classes in sorted(config.concept_types.items())
                 })
-            elif config.concept_method == "transformer":
+            elif config.concept_method == "transformer" or config.concept_method == "transformer_ce":
                 # Create a transformer-based concept learning module
                 if num_layers > 1:
                     # Add concept layer as the final layer
@@ -475,7 +501,7 @@ class ConceptACTEncoder(nn.Module):
             self, x: Tensor, pos_embed: Tensor | None = None, key_padding_mask: Tensor | None = None
     ) -> Tensor | Tuple[Tensor, Tensor]:
         concept_attn = None
-
+        concepts = None
         # Process through all layers except potentially the last concept layer
         for i in range(len(self.layers) - 1):
             x = self.layers[i](x, pos_embed=pos_embed, key_padding_mask=key_padding_mask)
@@ -491,7 +517,7 @@ class ConceptACTEncoder(nn.Module):
 
             #concepts = torch.concatenate([value for key, value in sorted(concepts_dict)], dim=-1)
             concepts = concepts_dict
-        elif self.config.concept_method == "transformer":
+        elif self.config.concept_method == "transformer" or self.config.concept_method == "transformer_ce":
             # Process the last layer, which is a concept layer
             last_layer = self.layers[-1]
             x, concepts = last_layer(x, pos_embed=pos_embed, key_padding_mask=key_padding_mask)

@@ -128,7 +128,7 @@ class ConceptACTConfig(ACTConfig):
     def __post_init__(self):
         super().__post_init__()
 
-        if self.use_concept_learning and self.concept_method not in ["prediction_head", "transformer"]:
+        if self.use_concept_learning and self.concept_method not in ["prediction_head", "transformer", "transformer_ce"]:
             raise ValueError(
                 f"Concept method must be one of 'prediction_head' or 'transformer'. Got {self.concept_method}."
             )
