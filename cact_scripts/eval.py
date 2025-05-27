@@ -195,8 +195,7 @@ def run_evaluation(
         log_say(f"Test case {i+1}: {test_case.color} {test_case.shape} at location {test_case.location}", play_sounds)
         print(f"\nRunning test case {i+1}/{len(test_cases)}: {test_case.color} {test_case.shape} at location {test_case.location}")
         print(f"Expected dropoff: {test_case.expected_dropoff}")
-        print("Press UP arrow for success or DOWN arrow for failure after the episode")
-        
+        input("Press to continue")
         # Reset events for this episode
         events["arrow_up"] = False
         events["arrow_down"] = False
@@ -247,9 +246,10 @@ def run_evaluation(
         
         # Reset environment before next episode
         log_say("Reset environment for next test case", play_sounds)
-        print("\nPlease reset the environment for the next test case...")
+        print("\nPlease reset the robot for the next test case...")
         # Allow teleoperation during reset to position the robot correctly
         warmup_record(robot, events, True, warmup_time_s=warmup_time_s, display_cameras=display_cameras, fps=fps)
+        print("Robot reset")
     
     # Stop and clean up
     log_say("Evaluation complete", play_sounds)
@@ -290,6 +290,53 @@ def extended_init_keyboard_listener():
     return listener, events
 
 
+from lerobot.configs.default import DatasetConfig, EvalConfig, WandBConfig
+
+from lerobot.configs.policies import PreTrainedConfig
+from lerobot.configs.default import EvalConfig
+from lerobot.scripts.control_robot import ControlPipelineConfig
+from lerobot.common.robot_devices.robots.configs import RobotConfig
+import datetime as dt
+@dataclass
+class EvalPipelineConfig:
+    # Either the repo ID of a model hosted on the Hub or a path to a directory containing weights
+    # saved using `Policy.save_pretrained`. If not provided, the policy is initialized from scratch
+    # (useful for debugging). This argument is mutually exclusive with `--config`.
+    n_episodes: int = 50
+    policy: PreTrainedConfig | None = None
+    output_dir: Path | None = None
+    job_name: str | None = None
+    seed: int | None = 1000
+    robot: RobotConfig = None
+    control: ControlPipelineConfig = None
+    dataset: DatasetConfig = None
+
+    def __post_init__(self):
+        # HACK: We parse again the cli args here to get the pretrained path if there was one.
+        policy_path = parser.get_path_arg("policy")
+        if policy_path:
+            cli_overrides = parser.get_cli_overrides("policy")
+            self.policy = PreTrainedConfig.from_pretrained(policy_path, cli_overrides=cli_overrides)
+            self.policy.pretrained_path = policy_path
+
+        else:
+            raise Exception("No pretrained path was provided")
+
+
+        if not self.job_name:
+            self.job_name = f"eval_{self.policy.type}"
+
+
+        if not self.output_dir:
+            now = dt.datetime.now()
+            eval_dir = f"{now:%Y-%m-%d}/{now:%H-%M-%S}_{self.job_name}"
+            self.output_dir = Path("outputs/eval") / eval_dir
+
+    @classmethod
+    def __get_path_fields__(cls) -> list[str]:
+        """This enables the parser to load config from the policy using `--policy.path=local/dir`"""
+        return ["policy"]
+
 @parser.wrap()
 def eval_main(cfg: EvalPipelineConfig):
     """Main function for policy evaluation on the real robot."""
@@ -309,12 +356,19 @@ def eval_main(cfg: EvalPipelineConfig):
     # Initialize robot
     logging.info("Creating robot.")
     robot = make_robot_from_config(cfg.robot)
-    
+
+    # Loading TrainingDataset Meta:
+    logging.info("Creating dataset")
+    from lerobot.common.datasets.factory import make_dataset
+
+    dataset = make_dataset(cfg)
+
     # Load policy
     logging.info("Loading policy.")
     policy = make_policy(
         cfg=cfg.policy,
-        env_cfg=cfg.env,
+        ds_meta=dataset.meta,
+        env_cfg=None,
     )
     policy.eval()
     
@@ -331,7 +385,7 @@ def eval_main(cfg: EvalPipelineConfig):
         results = run_evaluation(
             robot=robot,
             policy=policy,
-            test_cases=test_cases[:cfg.eval.n_episodes],
+            test_cases=test_cases[:cfg.n_episodes],
             fps=30,
             warmup_time_s=5,
             episode_time_s=30,
