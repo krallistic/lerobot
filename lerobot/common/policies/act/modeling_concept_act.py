@@ -41,6 +41,14 @@ class ConceptACTPolicy(ACTPolicy):
 
         self.reset()
 
+    def get_optim_params(self) -> list[dict]:
+        concept_params = [p for name, p in self.named_parameters() if 'concept' in name]
+        other_params = [p for name, p in self.named_parameters() if 'concept' not in name]
+        return [
+            {'params': other_params, 'lr': self.config.optimizer_lr},
+            {'params': concept_params, 'lr': self.config.optimizer_lr * 10.0}  # Higher LR for concept head
+        ]
+
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
         """Run the batch through the model and compute the loss for training or validation."""
@@ -92,7 +100,6 @@ class ConceptACTPolicy(ACTPolicy):
             total_loss = total_loss + concept_loss * self.config.concept_weight
 
         elif self.config.use_concept_learning and self.config.concept_method == "transformer_ce":
-            # For transformer method, keep the existing MSE loss implementation
             # TODO add NORM loss
             start = 0
             concept_loss = 0.0
@@ -113,6 +120,70 @@ class ConceptACTPolicy(ACTPolicy):
                 start = start + current_concept_class_size
 
             loss_dict["concept_loss"] = concept_loss.item()
+            total_loss = total_loss + concept_loss * self.config.concept_weight
+        elif self.config.use_concept_learning and self.config.concept_method == "transformer_bce":
+            # Concatenate all targets into a single multi-label tensor
+            all_targets = torch.concatenate([batch[key] for key, value in sorted(self.config.concept_types.items())], dim=-1).float()
+
+
+            # Calculate pos_weight dynamically
+            number_of_positive = len(self.config.concept_types.keys())
+            number_of_negative = all_targets.shape[-1] - number_of_positive
+            pos_weight_value = number_of_negative / number_of_positive
+            pos_weight = torch.tensor([pos_weight_value] * all_targets.shape[-1], device=all_targets.device)
+
+            # DEBUG: Let's see what the raw logits look like
+            #with torch.no_grad():
+            #    print(f"Raw logits stats: mean={concepts_hat.mean().item():.3f}, std={concepts_hat.std().item():.3f}")
+            #    print(f"Raw logits range: min={concepts_hat.min().item():.3f}, max={concepts_hat.max().item():.3f}")
+            #    print(f"Target sum per batch: {all_targets.sum(dim=1)}")  # Should be [3, 3, 3, ...] for each batch
+
+            # Apply BCE loss with positive weighting
+            concept_loss = F.binary_cross_entropy_with_logits(
+                concepts_hat,
+                all_targets.float(),
+                pos_weight=pos_weight
+            )
+
+            # Add detailed logging
+            with torch.no_grad():
+                probs = torch.sigmoid(concepts_hat)
+                predictions = (probs > 0.5).float()
+
+                # Calculate metrics
+                true_positives = (predictions * all_targets).sum()
+                predicted_positives = predictions.sum()
+                actual_positives = all_targets.sum()
+                total_elements = all_targets.numel()
+                correct_predictions = (predictions == all_targets).float().sum()
+
+                # Avoid division by zero
+                precision = (true_positives / predicted_positives).item() if predicted_positives > 0 else 0.0
+                recall = (true_positives / actual_positives).item() if actual_positives > 0 else 0.0
+                f1_score = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+                accuracy = (correct_predictions / total_elements).item()
+
+                # Probability statistics
+                mean_prob_positive = probs[all_targets == 1].mean().item() if (all_targets == 1).any() else 0.0
+                mean_prob_negative = probs[all_targets == 0].mean().item() if (all_targets == 0).any() else 0.0
+
+                # Update loss dictionary with detailed metrics
+                loss_dict.update({
+                    "concept_loss": concept_loss.item(),
+                    "mean_concept_hat": concepts_hat.mean().item(),
+                    "mean_concept_target": all_targets.mean().item(),
+                    "sum_targets_per_batch": all_targets.sum().item(),
+                    "concept_precision": precision,
+                    "concept_recall": recall,
+                    "concept_f1": f1_score,
+                    "concept_accuracy": accuracy,
+                    "mean_prob_positive": mean_prob_positive,
+                    "mean_prob_negative": mean_prob_negative,
+                    "num_predicted_positive": predicted_positives.item(),
+                    "num_actual_positive": actual_positives.item(),
+                    "num_true_positive": true_positives.item(),
+                    "pos_weight_used": pos_weight_value
+                })
             total_loss = total_loss + concept_loss * self.config.concept_weight
         elif self.config.use_concept_learning and self.config.concept_method == "transformer":
             # For transformer method, keep the existing MSE loss implementation
@@ -362,14 +433,23 @@ class ConceptACTEncoderLayer(nn.Module):
         # Learnable concepts
         self.concepts = nn.Parameter(torch.zeros(1, self.n_concepts, config.dim_model))
         nn.init.trunc_normal_(self.concepts, std=1.0 / math.sqrt(config.dim_model))
-
+        self.number_of_concept_heads = config.n_heads * 2
         # Cross-attention for concept pathway
         self.concept_attn = nn.MultiheadAttention(
-            config.dim_model, config.n_heads * 2, dropout=config.dropout
+            config.dim_model, self.number_of_concept_heads, dropout=config.dropout,
         )
 
         # Projection layer after concatenation
         self.concept_proj = nn.Linear(config.dim_model * 2, config.dim_model)
+
+        self.head_weight_predictor = nn.Sequential(
+            nn.Linear(config.dim_model, self.number_of_concept_heads * 4),
+            nn.SELU(),
+            nn.Linear(self.number_of_concept_heads * 4, self.number_of_concept_heads * 2),
+            nn.SELU(),
+            nn.Linear(self.number_of_concept_heads * 2, self.number_of_concept_heads),
+            nn.Softmax(dim=-1)
+        )
 
         # Standard feed-forward network as in ACTEncoderLayer
         self.linear1 = nn.Linear(config.dim_model, config.dim_feedforward)
@@ -418,14 +498,28 @@ class ConceptACTEncoderLayer(nn.Module):
         x_concept, concept_attn = self.concept_attn(
             query=q,  # Use the same query as in self-attention (with pos_embed if provided)
             key=concepts,
-            value=concepts
-        )
+            value=concepts,
+            average_attn_weights=False,
+        ) # return shape: `(N, \text{num\_heads}, L, S)
+
+        concept_attn = concept_attn.mean(-2) # Mean over Seq Lenght
+
+        # Use mean pooling across sequence dimension to get per-batch representation
+        #input_repr = x.mean(0)  # (batch_size, dim_model)
+        # First token as
+        #input_repr = x[0, :, :].squeeze()
+        input_repr = x
+        head_weights = self.head_weight_predictor(input_repr).mean(0)  # (batch_size, n_heads)
+
+        # Apply dynamic weights
+        head_weights = head_weights.unsqueeze(-1) # (batch_size, n_heads, 1,)
+        concept_attn = (concept_attn * head_weights).sum(1)
 
         # Concatenate the self-attention output with concept output along feature dimension
         x_combined = torch.cat([x_self_attn, x_concept], dim=-1)
 
         # Project back to original dimension
-        x = self.concept_proj(x_combined)
+        x = self.activation(self.concept_proj(x_combined))
 
 
         # Add residual connection and normalization
@@ -483,7 +577,7 @@ class ConceptACTEncoder(nn.Module):
                     )
                     for concept_name, num_classes in sorted(config.concept_types.items())
                 })
-            elif config.concept_method == "transformer" or config.concept_method == "transformer_ce":
+            elif config.concept_method == "transformer" or config.concept_method == "transformer_ce" or config.concept_method == "transformer_bce":
                 # Create a transformer-based concept learning module
                 if num_layers > 1:
                     # Add concept layer as the final layer
@@ -517,12 +611,12 @@ class ConceptACTEncoder(nn.Module):
 
             #concepts = torch.concatenate([value for key, value in sorted(concepts_dict)], dim=-1)
             concepts = concepts_dict
-        elif self.config.concept_method == "transformer" or self.config.concept_method == "transformer_ce":
+        elif self.config.concept_method == "transformer" or self.config.concept_method == "transformer_ce" or self.config.concept_method == "transformer_bce":
             # Process the last layer, which is a concept layer
             last_layer = self.layers[-1]
             x, concepts = last_layer(x, pos_embed=pos_embed, key_padding_mask=key_padding_mask)
-            if self.config.n_heads > 1:
-                concepts = concepts.mean(1) # Dim 1 should be the Head dimensions
+            #if self.config.n_heads > 1:
+            #    concepts = concepts.mean(1) # Dim 1 should be the Head dimensions
         x = self.norm(x)
 
         if concepts is not None:
