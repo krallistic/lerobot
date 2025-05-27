@@ -4,7 +4,7 @@
 DATASET_PREFIX="individual_cases_simple_with_concepts"
 
 
-BASE_JOB_NAME="concept_act_so100_transformer_ce_lower_concept_weight"
+BASE_JOB_NAME="concept_act_so100_transformer_bce_v2"
 BASE_OUTPUT_DIR="outputs/train/${BASE_JOB_NAME}"
 DEVICE="cuda"  # Use "cuda" for GPU or "cpu" for CPU
 
@@ -69,7 +69,7 @@ for SEED in "${SEEDS[@]}"; do
       --batch_size=$BATCH_SIZE \
       --steps=$STEPS \
       --policy.use_concept_learning=true \
-      --policy.concept_method=transformer_ce \
+      --policy.concept_method=transformer_bce \
       --policy.n_heads=16 \
       --log_freq=2000 \
       --seed=$SEED \
