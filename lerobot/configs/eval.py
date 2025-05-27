@@ -44,9 +44,8 @@ class EvalPipelineConfig:
             self.policy.pretrained_path = policy_path
 
         else:
-            logging.warning(
-                "No pretrained path was provided, evaluated policy will be built from scratch (random weights)."
-            )
+            raise Exception("No pretrained path was provided")
+
 
         if not self.job_name:
             if self.env is None:
