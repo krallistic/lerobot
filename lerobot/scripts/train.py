@@ -101,10 +101,9 @@ def update_policy(
         policy.update()
 
     train_metrics.total_loss = loss.item()
-    train_metrics.l1_loss = output_dict['l1_loss']
-    train_metrics.kld_loss = output_dict['kld_loss']
+    for key in output_dict:
+        train_metrics.metrics[key].update(output_dict[key])
     if type(policy) == ConceptACTPolicy:
-        train_metrics.concept_loss = output_dict['concept_loss']
         train_metrics.normal_loss = output_dict['l1_loss'] + output_dict['kld_loss']
     train_metrics.grad_norm = grad_norm.item()
     train_metrics.lr = optimizer.param_groups[0]["lr"]
@@ -178,6 +177,45 @@ def split_dataset_random(dataset, cfg: TrainPipelineConfig, train_ratio=0.8):
 
     return train_dataloader, test_dataloader
 
+
+def create_metrics_tracker(loss_dict: dict, cfg, dataset, step: int = 0) -> MetricsTracker:
+    """
+    Dynamically create a MetricsTracker based on the loss dictionary.
+
+    Args:
+        loss_dict: Dictionary containing loss values from the first forward pass
+        cfg: Training configuration
+        dataset: Training dataset
+        step: Initial step count
+
+    Returns:
+        MetricsTracker: Configured metrics tracker
+    """
+    # Base metrics that are always present
+    base_metrics = {
+        "total_loss": AverageMeter("total_loss", ":.3f"),
+        "grad_norm": AverageMeter("grad_norm", ":.3f"),
+        "lr": AverageMeter("lr", ":0.1e"),
+        "update_s": AverageMeter("update_s", ":.3f"),
+        "dataloading_s": AverageMeter("dataloading_s", ":.3f"),
+        "eval_loss": AverageMeter("eval_loss", ":.3f")
+    }
+
+
+
+    # Add metrics from loss dictionary
+    for key, value in loss_dict.items():
+        if key not in base_metrics:  # Don't override base metrics
+            base_metrics[key] = AverageMeter(key, ":.3f")
+    if "concept_loss" in loss_dict:
+        base_metrics['normal_loss'] = AverageMeter("normal_loss", ":.3f")
+    return MetricsTracker(
+        cfg.batch_size,
+        dataset.num_frames,
+        dataset.num_episodes,
+        base_metrics,
+        initial_step=step
+    )
 
 @parser.wrap()
 def train(cfg: TrainPipelineConfig):
@@ -254,37 +292,31 @@ def train(cfg: TrainPipelineConfig):
 
     policy.train()
 
-    train_metrics = {
-        "total_loss": AverageMeter("total_loss", ":.3f"),
-        "kld_loss": AverageMeter("kld_loss", ":.3f"),
-        "l1_loss": AverageMeter("l1_loss", ":.3f"),
-        "grad_norm": AverageMeter("grdn", ":.3f"),
-        "lr": AverageMeter("lr", ":0.1e"),
-        "update_s": AverageMeter("updt_s", ":.3f"),
-        "dataloading_s": AverageMeter("data_s", ":.3f"),
-        "eval_loss": AverageMeter("eval_loss", ":.3f")
-    }
-    if type(policy) == ConceptACTPolicy:
-        add_train_metrics = {
-            "concept_loss": AverageMeter("concept_loss", ":.3f"),
-            "normal_loss": AverageMeter("normal_loss", ":.3f"),
+    train_tracker = None
 
-        }
-        train_metrics.update(add_train_metrics)
-
-    train_tracker = MetricsTracker(
-        cfg.batch_size, dataset.num_frames, dataset.num_episodes, train_metrics, initial_step=step
-    )
 
     logging.info("Start offline training on a fixed dataset")
     for _ in range(step, cfg.steps):
         start_time = time.perf_counter()
         batch = next(dl_iter)
-        train_tracker.dataloading_s = time.perf_counter() - start_time
+        dataloading_time = time.perf_counter() - start_time
 
         for key in batch:
             if isinstance(batch[key], torch.Tensor):
                 batch[key] = batch[key].to(device, non_blocking=True)
+
+        # If this is the first iteration, create the metrics tracker dynamically
+        if train_tracker is None:
+            # Get the loss dict from the first forward pass to determine metrics
+            with torch.no_grad():
+                _, sample_output_dict = policy.forward(batch)
+
+            # Create metrics tracker based on the loss dictionary
+            train_tracker = create_metrics_tracker(sample_output_dict, cfg, dataset, step)
+            logging.info(f"Created metrics tracker with fields: {list(train_tracker.metrics.keys())}")
+
+        # Set dataloading time
+        train_tracker.dataloading_s = dataloading_time
 
         train_tracker, output_dict = update_policy(
             train_tracker,
