@@ -7,11 +7,12 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 HF_USER=$(huggingface-cli whoami | head -n 1)
 echo "Logged in as: $HF_USER"
 
-BASE_JOB_NAME="act_normal_so100_more_heads"
+BASE_JOB_NAME="act_normal_so100_30krun"
 BASE_OUTPUT_DIR="outputs/train/${BASE_JOB_NAME}"
 
 # Random seeds to loop over
 SEEDS=(42 123 456)
+SEEDS=(100 101 102 103 104)
 
 echo "Collecting Datasets"
 # List directories, grep for _simple, and remove trailing slashes
@@ -33,7 +34,7 @@ ENABLE_WANDB=true  # Set to true to enable Weights & Biases logging
 
 LEARNING_RATE=1e-5
 BATCH_SIZE=8
-STEPS=100000
+STEPS=30000
 
 # Loop over each seed
 for SEED in "${SEEDS[@]}"; do
@@ -62,6 +63,7 @@ for SEED in "${SEEDS[@]}"; do
     --steps=$STEPS \
     --policy.n_heads=16 \
     --log_freq=2000 \
+    --save_freq=3000 \
     --seed=$SEED \
     $WANDB_FLAG
     

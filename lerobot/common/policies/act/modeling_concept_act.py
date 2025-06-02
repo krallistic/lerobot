@@ -565,6 +565,8 @@ class ConceptACTEncoder(nn.Module):
 
 
                 # We append an IdentyLayer so we can share more code with the ConceptTransformer Approach.
+                self.layers.append(ACTEncoderLayer(config))
+
                 self.layers.append(nn.Identity())
 
                 # Create prediction heads for each concept type defined in config

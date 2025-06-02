@@ -4,13 +4,13 @@
 DATASET_PREFIX="individual_cases_simple_with_concepts"
 
 
-BASE_JOB_NAME="concept_act_so100_30krun"
+BASE_JOB_NAME="concept_act_prediction_head_so100_30krun"
 BASE_OUTPUT_DIR="outputs/train/${BASE_JOB_NAME}"
 DEVICE="cuda"  # Use "cuda" for GPU or "cpu" for CPU
 
 # Random seeds to loop over
 SEEDS=(42 123 456)
-SEEDS=(100 101 102 103 104)
+SEEDS=(42 123 456 100 101 102 103 104)
 
 CONCEPT_WEIGHT=0.1  # Weight for concept loss component
 ENABLE_WANDB=true  # Set to true to enable Weights & Biases logging
@@ -70,7 +70,7 @@ for SEED in "${SEEDS[@]}"; do
       --batch_size=$BATCH_SIZE \
       --steps=$STEPS \
       --policy.use_concept_learning=true \
-      --policy.concept_method=transformer_bce \
+      --policy.concept_method=prediction_head \
       --policy.n_heads=16 \
       --log_freq=2000 \
       --save_freq=3000 \
