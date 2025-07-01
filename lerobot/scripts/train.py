@@ -171,7 +171,9 @@ def split_dataset_random(dataset, cfg: TrainPipelineConfig, train_ratio=0.8):
         batch_size=cfg.batch_size,
         shuffle=True,
         sampler=None,
-        pin_memory=cfg.policy.device != "cpu",
+        #pin_memory=cfg.policy.device != "cpu",
+        pin_memory=True,
+        pin_memory_device='cuda',
         drop_last=False,
     )
 
@@ -338,6 +340,7 @@ def train(cfg: TrainPipelineConfig):
         is_eval_step = cfg.eval_freq > 0 and step % cfg.eval_freq == 0
 
         if is_log_step:
+            logging.info("calc validation eval loss on dataset")
             eval_loss = validataion_loss_eval(policy, test_dataloader)
             train_tracker.eval_loss = eval_loss
             logging.info(train_tracker)
@@ -355,6 +358,8 @@ def train(cfg: TrainPipelineConfig):
             update_last_checkpoint(checkpoint_dir)
             if wandb_logger:
                 wandb_logger.log_policy(checkpoint_dir)
+            logging.info(f"End of Checkpoint policy after step {step}")
+
 
         if cfg.env and is_eval_step:
             step_id = get_step_identifier(step, cfg.steps)
