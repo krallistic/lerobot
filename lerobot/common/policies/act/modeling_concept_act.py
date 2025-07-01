@@ -6,6 +6,223 @@ import einops
 import torch.nn.functional as F  # noqa: N812
 from typing import Tuple
 import math
+
+import torch
+import torch.nn as nn
+from typing import Callable
+
+
+class RBFLayer(nn.Module):
+    """
+    Defines a Radial Basis Function Layer that handles arbitrary batch dimensions
+
+    An RBF network output is given by:
+    y(x) = sum_{i=1}^N w_i * phi(eps_i * ||x - c_i||)
+
+    Parameters
+    ----------
+        in_features_dim: int
+            Dimensionality of the input features
+        num_kernels: int
+            Number of RBF kernels to use
+        out_features_dim: int
+            Dimensionality of the output features
+        rbf_type: str
+            Type of RBF kernel function. Options: 'gaussian', 'multiquadric',
+            'inverse_quadratic', 'thin_plate_spline'
+        norm_function: Callable[[torch.Tensor], torch.Tensor], optional
+            Norm function for distance computation (default: L2 norm)
+        normalization: bool, optional
+            If True, normalizes RBF outputs to sum to 1 (default: True)
+    """
+
+    # Available RBF functions
+    RBF_FUNCTIONS = {
+        'gaussian': lambda r: torch.exp(-r ** 2),
+        'multiquadric': lambda r: 1.0 / torch.sqrt(1 + r ** 2),
+        'inverse_quadratic': lambda r: 1.0 / (1 + r ** 2),
+        'thin_plate_spline': lambda r: torch.where(r > 0, r ** 2 * torch.log(r + 1e-10), torch.zeros_like(r))
+    }
+
+    def __init__(self,
+                 in_features_dim: int,
+                 num_kernels: int,
+                 out_features_dim: int,
+                 rbf_type: str = 'gaussian',
+                 norm_function: Callable[[torch.Tensor], torch.Tensor] = None,
+                 normalization: bool = True):
+        super(RBFLayer, self).__init__()
+
+        self.in_features_dim = in_features_dim
+        self.num_kernels = num_kernels
+        self.out_features_dim = out_features_dim
+        self.rbf_type = rbf_type
+        self.normalization = normalization
+
+        # Set RBF function based on string parameter
+        if rbf_type not in self.RBF_FUNCTIONS:
+            raise ValueError(f"Unknown RBF type: {rbf_type}. Available options: {list(self.RBF_FUNCTIONS.keys())}")
+        self.radial_function = self.RBF_FUNCTIONS[rbf_type]
+
+        # Default to L2 norm if none provided
+        if norm_function is None:
+            self.norm_function = lambda x: torch.norm(x, dim=-1)
+        else:
+            self.norm_function = norm_function
+
+        # Initialize parameters
+        self.kernels_centers = nn.Parameter(
+            torch.zeros(num_kernels, in_features_dim, dtype=torch.float32))
+
+        self.log_shapes = nn.Parameter(
+            torch.zeros(num_kernels, dtype=torch.float32))
+
+        self.weights = nn.Parameter(
+            torch.zeros(out_features_dim, num_kernels, dtype=torch.float32))
+
+        self.reset()
+
+    def reset(self,
+              upper_bound_kernels: float = 1.0,
+              std_shapes: float = 0.1,
+              gain_weights: float = 1.0) -> None:
+        """
+        Resets all parameters to random initial values
+
+        Parameters
+        ----------
+            upper_bound_kernels: float
+                Range for uniform initialization of kernel centers [-x, x]
+            std_shapes: float
+                Standard deviation for normal initialization of log-shape parameters
+            gain_weights: float
+                Gain for Xavier uniform initialization of weights
+        """
+        nn.init.uniform_(self.kernels_centers,
+                         a=-upper_bound_kernels,
+                         b=upper_bound_kernels)
+        nn.init.normal_(self.log_shapes, mean=0.0, std=std_shapes)
+        nn.init.xavier_uniform_(self.weights, gain=gain_weights)
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass supporting arbitrary leading batch dimensions
+
+        Parameters
+        ----------
+            input: torch.Tensor
+                Input tensor of shape (..., in_features_dim) where ...
+                represents any number of leading dimensions
+
+        Returns
+        -------
+            out: torch.Tensor
+                Output tensor of shape (..., out_features_dim)
+        """
+        # Store original shape for later reshaping
+        original_shape = input.shape[:-1]  # All dims except last
+        feature_dim = input.shape[-1]
+
+        assert feature_dim == self.in_features_dim, \
+            f"Expected input feature dim {self.in_features_dim}, got {feature_dim}"
+
+        # Flatten leading dimensions: (..., in_features) -> (N, in_features)
+        input_flat = input.view(-1, self.in_features_dim)
+        batch_size = input_flat.size(0)
+
+        # Compute differences from centers
+        # input_flat: (N, in_features_dim)
+        # kernels_centers: (num_kernels, in_features_dim)
+        input_expanded = input_flat.unsqueeze(1)  # (N, 1, in_features_dim)
+        centers_expanded = self.kernels_centers.unsqueeze(0)  # (1, num_kernels, in_features_dim)
+
+        diff = input_expanded - centers_expanded  # (N, num_kernels, in_features_dim)
+
+        # Apply norm function: (N, num_kernels, in_features_dim) -> (N, num_kernels)
+        r = self.norm_function(diff)
+
+        # Apply shape parameters: (N, num_kernels)
+        shapes = self.log_shapes.exp()  # (num_kernels,)
+        eps_r = shapes.unsqueeze(0) * r  # (1, num_kernels) * (N, num_kernels)
+
+        # Apply radial basis function: (N, num_kernels)
+        rbfs = self.radial_function(eps_r)
+
+        # Apply normalization if requested
+        if self.normalization:
+            # Prevent division by zero
+            rbf_sums = rbfs.sum(dim=-1, keepdim=True) + 1e-9  # (N, 1)
+            rbfs = rbfs / rbf_sums  # (N, num_kernels)
+
+        # Linear combination with weights
+        # weights: (out_features_dim, num_kernels)
+        # rbfs: (N, num_kernels)
+        out_flat = torch.matmul(rbfs, self.weights.t())  # (N, out_features_dim)
+
+        # Reshape back to original leading dimensions
+        output_shape = original_shape + (self.out_features_dim,)
+        out = out_flat.view(output_shape)
+
+        return out
+
+    @property
+    def get_kernels_centers(self):
+        """Returns the centers of the kernels"""
+        return self.kernels_centers.detach()
+
+    @property
+    def get_weights(self):
+        """Returns the linear combination weights"""
+        return self.weights.detach()
+
+    @property
+    def get_shapes(self):
+        """Returns the shape parameters"""
+        return self.log_shapes.detach().exp()
+
+class RBFActivation(nn.Module):
+    def __init__(self, input_dim, n_centers=None, rbf_type='gaussian'):
+        super().__init__()
+        # Default: use input_dim // 4 centers (more reasonable compression)
+        if n_centers is None:
+            n_centers = max(1, input_dim // 4)
+
+        self.input_dim = input_dim
+        self.n_centers = n_centers
+        self.centers = nn.Parameter(torch.randn(n_centers, input_dim))
+        self.gamma = nn.Parameter(torch.ones(n_centers) * 1.5)  # Even wider
+        self.rbf_type = rbf_type
+
+    def forward(self, x):
+        # x can be any shape (..., input_dim)
+        # We want output (..., n_centers)
+
+        original_shape = x.shape[:-1]  # All dimensions except last
+        feature_dim = x.shape[-1]
+
+        # Flatten all leading dimensions
+        x_flat = x.view(-1, feature_dim)  # (N, input_dim) where N = prod(leading_dims)
+
+        # Expand for distance computation
+        x_expanded = x_flat.unsqueeze(1)  # (N, 1, input_dim)
+        centers_expanded = self.centers.unsqueeze(0)  # (1, n_centers, input_dim)
+
+        # Compute distances
+        distances = torch.norm(x_expanded - centers_expanded, dim=-1)  # (N, n_centers)
+
+        # Apply RBF kernel
+        if self.rbf_type == 'gaussian':
+            activations = torch.exp(-self.gamma * distances ** 2)
+        elif self.rbf_type == 'multiquadric':
+            activations = 1.0 / torch.sqrt(1 + self.gamma * distances ** 2)
+
+        # Reshape back to original leading dimensions + n_centers
+        output_shape = original_shape + (self.n_centers,)
+        activations = activations.view(output_shape)
+
+        return activations  # (..., n_centers)
+
+
 class ConceptACTPolicy(ACTPolicy):
     """ACT Policy with concept learning capabilities.
     
@@ -42,11 +259,31 @@ class ConceptACTPolicy(ACTPolicy):
         self.reset()
 
     def get_optim_params(self) -> list[dict]:
-        concept_params = [p for name, p in self.named_parameters() if 'concept' in name]
-        other_params = [p for name, p in self.named_parameters() if 'concept' not in name]
+        rbf_params = []
+        concept_params = []
+        other_params = []
+
+        # Define your module types
+        CONCEPT_MODULE_TYPES = (
+            ConceptACTEncoderLayer,
+            # Add your actual concept module classes here
+        )
+
+        RBF_MODULE_TYPES = (RBFLayer,)
+
+        for module_name, module in self.named_modules():
+            for param_name, param in module.named_parameters(recurse=False):
+                if isinstance(module, RBF_MODULE_TYPES):
+                    rbf_params.append(param)
+                elif isinstance(module, CONCEPT_MODULE_TYPES):
+                    concept_params.append(param)
+                else:
+                    other_params.append(param)
+
         return [
             {'params': other_params, 'lr': self.config.optimizer_lr},
-            {'params': concept_params, 'lr': self.config.optimizer_lr * 10.0}  # Higher LR for concept head
+            {'params': concept_params, 'lr': self.config.optimizer_lr * 10.0},
+            {'params': rbf_params, 'lr': self.config.optimizer_lr * 10000.0}
         ]
 
 
@@ -441,15 +678,26 @@ class ConceptACTEncoderLayer(nn.Module):
 
         # Projection layer after concatenation
         self.concept_proj = nn.Linear(config.dim_model * 2, config.dim_model)
-
-        self.head_weight_predictor = nn.Sequential(
-            nn.Linear(config.dim_model, self.number_of_concept_heads * 4),
-            nn.SELU(),
-            nn.Linear(self.number_of_concept_heads * 4, self.number_of_concept_heads * 2),
-            nn.SELU(),
-            nn.Linear(self.number_of_concept_heads * 2, self.number_of_concept_heads),
-            nn.Softmax(dim=-1)
-        )
+        if config.use_rbf_head_selection:
+            self.head_weight_predictor = nn.Sequential(
+                nn.Linear(config.dim_model, self.number_of_concept_heads * 4),
+                #RBFActivation(self.number_of_concept_heads * 4, n_centers=self.number_of_concept_heads * 2),
+                nn.SELU(),
+                nn.Linear(self.number_of_concept_heads * 4, self.number_of_concept_heads * 2),
+                nn.LayerNorm(self.number_of_concept_heads * 2),
+                RBFLayer(in_features_dim=self.number_of_concept_heads * 2, num_kernels=self.number_of_concept_heads, out_features_dim=self.number_of_concept_heads),
+                #RBFActivation(self.number_of_concept_heads * 2, n_centers=self.number_of_concept_heads),
+                #nn.Linear(self.number_of_concept_heads, self.number_of_concept_heads),
+            )
+        else:
+            self.head_weight_predictor = nn.Sequential(
+                nn.Linear(config.dim_model, self.number_of_concept_heads * 4),
+                nn.SELU(),
+                nn.Linear(self.number_of_concept_heads * 4, self.number_of_concept_heads * 2),
+                nn.SELU(),
+                nn.Linear(self.number_of_concept_heads * 2, self.number_of_concept_heads),
+                nn.Softmax(dim=-1)
+            )
 
         # Standard feed-forward network as in ACTEncoderLayer
         self.linear1 = nn.Linear(config.dim_model, config.dim_feedforward)
@@ -504,12 +752,27 @@ class ConceptACTEncoderLayer(nn.Module):
 
         concept_attn = concept_attn.mean(-2) # Mean over Seq Lenght
 
+        def gumbel_top_k(logits, k, tau=1.0, hard=False):
+            """Gumbel softmax with top-k masking"""
+            # Get top-k indices
+            top_k_values, top_k_indices = torch.topk(logits, k, dim=-1)
+
+            # Create mask for top-k elements
+            mask = torch.zeros_like(logits)
+            mask.scatter_(-1, top_k_indices, 1.0)
+
+            # Mask out non-top-k elements
+            masked_logits = logits.masked_fill(mask == 0, float('-inf'))
+
+            # Apply gumbel_softmax only to top-k elements
+            return F.gumbel_softmax(masked_logits, tau=tau, hard=hard, dim=-1)
         # Use mean pooling across sequence dimension to get per-batch representation
         #input_repr = x.mean(0)  # (batch_size, dim_model)
         # First token as
         #input_repr = x[0, :, :].squeeze()
         input_repr = x
-        head_weights = self.head_weight_predictor(input_repr).mean(0)  # (batch_size, n_heads)
+        head_logits = self.head_weight_predictor(input_repr).mean(0)  # (batch_size, n_heads)
+        head_weights = gumbel_top_k(head_logits, k=3, tau=0.1, hard=False)
 
         # Apply dynamic weights
         head_weights = head_weights.unsqueeze(-1) # (batch_size, n_heads, 1,)

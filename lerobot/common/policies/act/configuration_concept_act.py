@@ -120,6 +120,8 @@ class ConceptACTConfig(ACTConfig):
         }
     )
 
+    use_rbf_head_selection: bool = False
+
     # Training preset
     optimizer_lr: float = 1e-5
     optimizer_weight_decay: float = 1e-4
