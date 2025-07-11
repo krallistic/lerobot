@@ -112,6 +112,7 @@ def is_amp_available(device: str):
 
 
 def init_logging(log_file: Path | None = None, display_pid: bool = False):
+    pass
     def custom_format(record):
         dt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         fnameline = f"{record.pathname}:{record.lineno}"
@@ -124,7 +125,7 @@ def init_logging(log_file: Path | None = None, display_pid: bool = False):
             message = f"{record.levelname} {dt} {fnameline[-15:]:>15} {record.msg}"
         return message
 
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.DEBUG)
 
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)

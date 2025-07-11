@@ -770,7 +770,7 @@ class ConceptACTEncoderLayer(nn.Module):
         #input_repr = x.mean(0)  # (batch_size, dim_model)
         # First token as
         #input_repr = x[0, :, :].squeeze()
-        input_repr = x
+        input_repr = x_concept
         head_logits = self.head_weight_predictor(input_repr).mean(0)  # (batch_size, n_heads)
         head_weights = gumbel_top_k(head_logits, k=3, tau=0.1, hard=False)
 

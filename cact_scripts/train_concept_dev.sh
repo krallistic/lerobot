@@ -4,13 +4,14 @@
 DATASET_PREFIX="individual_cases_simple_with_concepts"
 
 
-BASE_JOB_NAME="concept_act_so100_topkgumbel"
+BASE_JOB_NAME="concept_act_so100_testafterupdate"
 BASE_OUTPUT_DIR="outputs/train/${BASE_JOB_NAME}"
 DEVICE="cuda"  # Use "cuda" for GPU or "cpu" for CPU
 
 # Random seeds to loop over
 SEEDS=(42 123 456)
 #SEEDS=(100 101 102 103 104)
+SEEDS(42)
 
 CONCEPT_WEIGHT=0.1  # Weight for concept loss component
 ENABLE_WANDB=true  # Set to true to enable Weights & Biases logging
@@ -73,8 +74,8 @@ for SEED in "${SEEDS[@]}"; do
       --policy.concept_method=transformer_bce \
       --policy.use_rbf_head_selection=false \
       --policy.n_heads=16 \
-      --log_freq=20000 \
-      --save_freq=3000 \
+      --log_freq=3000 \
+      --save_freq=20000 \
       --seed=$SEED \
       $WANDB_FLAG
       

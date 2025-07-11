@@ -36,6 +36,7 @@ python -m lerobot.record \
 """
 
 import logging
+logging.basicConfig(level = logging.INFO)
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -239,7 +240,7 @@ def record_loop(
 
 @parser.wrap()
 def record(cfg: RecordConfig) -> LeRobotDataset:
-    init_logging()
+    #init_logging()
     logging.info(pformat(asdict(cfg)))
     if cfg.display_data:
         _init_rerun(session_name="recording")
@@ -289,6 +290,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     recorded_episodes = 0
     while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
         log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
+        print("record episode")
         record_loop(
             robot=robot,
             events=events,

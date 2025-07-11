@@ -76,3 +76,40 @@ python lerobot/scripts/visualize_dataset_html.py \
   --control.num_episodes=2 \
   --control.push_to_hub=false \
   --control.policy.path=outputs/train/act_so100_test/checkpoints/last/pretrained_model
+
+
+python -m lerobot.calibrate --teleop.type=so100_leader --teleop.port=/dev/tty.ACM1  --teleop.id=so_100_leader 
+
+python -m lerobot.teleoperate \
+    --robot.type=so100_follower \
+    --robot.port=/dev/ttyACM0 \
+    --robot.id=so_100_follower \
+    --robot.cameras="{ hand: {type: opencv, index_or_path: 0, width: 480, height: 640, fps: 30, rotation: 90}, scene: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30}}" \
+    --teleop.type=so100_leader \
+    --teleop.port=/dev/ttyACM1 \
+    --teleop.id=so_100_leader \
+    --display_data=true
+
+
+
+python -m lerobot.record \
+    --robot.type=so100_follower \
+    --robot.port=/dev/ttyACM0 \
+    --robot.id=so_100_follower \
+    --robot.cameras="{ hand: {type: opencv, index_or_path: 0, width: 480, height: 640, fps: 30, rotation: 90}, scene: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30}}" \
+    --teleop.type=so100_leader \
+    --teleop.port=/dev/ttyACM1 \
+    --teleop.id=so_100_leader \
+    --display_data=False \
+    --dataset.repo_id=${HF_USER}/record-test \
+    --dataset.push_to_hub=False \
+    --dataset.num_episodes=2 \
+    --dataset.single_task="Test"
+
+
+python examples/backward_compatibility/replay.py \
+    --robot.type=so100_follower \
+    --robot.port=/dev/ttyACM0 \
+    --robot.id=so_100_follower \
+    --dataset.repo_id=krallistic/so100_individual_cases_simple_with_concepts_yellow-cube-3-B \
+    --dataset.episode=2
