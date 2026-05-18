@@ -641,8 +641,30 @@ class LeRobotDataset(torch.utils.data.Dataset):
             return get_hf_features_from_features(self.features)
 
     def _get_query_indices(self, idx: int, ep_idx: int) -> tuple[dict[str, list[int | bool]]]:
-        ep_start = self.episode_data_index["from"][ep_idx]
-        ep_end = self.episode_data_index["to"][ep_idx]
+        """
+        Fixed version that properly handles filtered episodes.
+
+        When episodes are filtered, we need to map from the original episode index
+        (stored in the data) to the position in our filtered episode_data_index.
+        """
+        # Map from episode index to position in episode_data_index
+        if self.episodes is not None:
+            # For filtered datasets, find the position of this episode
+            try:
+                ep_position = self.episodes.index(ep_idx)
+            except ValueError:
+                raise ValueError(
+                    f"Episode index {ep_idx} not found in filtered episodes list. "
+                    f"This might indicate a data inconsistency. Filtered episodes: {self.episodes}"
+                )
+        else:
+            # No filtering, episode index equals position
+            ep_position = ep_idx
+
+        # Use the position to look up in episode_data_index
+        ep_start = self.episode_data_index["from"][ep_position]
+        ep_end = self.episode_data_index["to"][ep_position]
+
         query_indices = {
             key: [max(ep_start.item(), min(ep_end.item() - 1, idx + delta)) for delta in delta_idx]
             for key, delta_idx in self.delta_indices.items()

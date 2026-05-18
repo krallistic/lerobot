@@ -13,18 +13,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Evaluate a trained policy on a real robot with user feedback.
-
-Usage:
-```
-python cact_scripts/eval.py \
-    --policy.path=outputs/train/concept_act_so100_transformer_ce_lower_concept_weight_seed42/checkpoints/020000/pretrained_model \
-    --robot.type=so100 \
-    --eval.n_episodes=10 \
-    --device=cuda
-```
-"""
 
 import json
 import logging
@@ -46,19 +34,39 @@ from tqdm import tqdm
 from lerobot.common.envs.utils import preprocess_observation
 from lerobot.common.policies.factory import make_policy
 from lerobot.common.policies.pretrained import PreTrainedPolicy
-from lerobot.common.robot_devices.control_utils import (
-    control_loop,
-    init_keyboard_listener,
-    log_control_info,
-    stop_recording,
-    warmup_record,
+from lerobot.common.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+
+from lerobot.common.policies.act.modeling_lavact import LAVACTPolicy
+
+from lerobot.common.utils.control_utils import control_loop
+from lerobot.record import record_loop
+
+from lerobot.common.robots import (  # noqa: F401
+    Robot,
+    RobotConfig,
+    koch_follower,
+    make_robot_from_config,
+    so100_follower,
+    so101_follower,
 )
-from lerobot.common.robot_devices.robots.utils import Robot, make_robot_from_config
-from lerobot.common.robot_devices.utils import busy_wait, safe_disconnect
+from lerobot.common.teleoperators import (  # noqa: F401
+    Teleoperator,
+    TeleoperatorConfig,
+    koch_leader,
+    make_teleoperator_from_config,
+    so100_leader,
+    so101_leader,
+)
+from lerobot.common.utils.robot_utils import busy_wait, safe_disconnect
 from lerobot.common.utils.random_utils import set_seed
 from lerobot.common.utils.utils import get_safe_torch_device, init_logging, log_say
 from lerobot.configs import parser
-from lerobot.configs.eval import EvalPipelineConfig
+from lerobot.configs.default import DatasetConfig, EvalConfig, WandBConfig
+from lerobot.configs.policies import PreTrainedConfig
+import datetime as dt
+
+
+from lerobot.common.datasets.utils import build_dataset_frame, hw_to_dataset_features
 
 
 @dataclass
@@ -166,9 +174,68 @@ def get_test_cases() -> List[TestCase]:
     return test_cases
 
 
+def init_keyboard_listener():
+    """Initialize the keyboard listener with numerical scoring."""
+    events = {
+        "stop_recording": False,
+        "rerecord_episode": False,
+        "exit_early": False,
+        "score_0": False,
+        "score_1": False,
+        "score_2": False,
+        "score_3": False,
+    }
+
+    def on_key_press(key, events):
+        """Handle key presses for user feedback and control."""
+        try:
+            # Handle number keys for scoring
+            if hasattr(key, 'char') and key.char and key.char.isdigit():
+                score = int(key.char)
+                if 0 <= score <= 3:
+                    events[f"score_{score}"] = True
+                    return
+
+            # Handle special keys
+            if key == pynput.keyboard.Key.left:
+                events["rerecord_episode"] = True
+            elif key == pynput.keyboard.Key.right:
+                events["exit_early"] = True
+            elif key == pynput.keyboard.Key.esc:
+                events["stop_recording"] = True
+        except AttributeError:
+            # Handle special keys that don't have char attribute
+            if key == pynput.keyboard.Key.left:
+                events["rerecord_episode"] = True
+            elif key == pynput.keyboard.Key.right:
+                events["exit_early"] = True
+            elif key == pynput.keyboard.Key.esc:
+                events["stop_recording"] = True
+
+    listener = pynput.keyboard.Listener(
+        on_press=lambda key: on_key_press(key, events)
+    )
+    listener.start()
+
+    return listener, events
+
+
+def stop_recording(robot, listener, teleop):
+    """Stop recording and clean up resources."""
+    if listener:
+        listener.stop()
+    
+    if robot.is_connected:
+        robot.disconnect()
+
+    if teleop.is_connected:
+        teleop.disconnect()
+
+
 @safe_disconnect
 def run_evaluation(
         robot: Robot,
+        teleop: Teleoperator,
         policy: PreTrainedPolicy,
         test_cases: List[TestCase],
         fps: int = 30,
@@ -176,6 +243,7 @@ def run_evaluation(
         episode_time_s: int = 30,
         display_cameras: bool = True,
         play_sounds: bool = True,
+        generic_task: bool = False,
 ) -> EvalResults:
     """
     Run evaluation on the real robot using the trained policy.
@@ -196,15 +264,32 @@ def run_evaluation(
     if not robot.is_connected:
         robot.connect()
 
+    if not teleop.is_connected:
+        teleop.connect()
+
     # Initialize keyboard listener with added support for numerical scoring
-    listener, events = extended_init_keyboard_listener()
+    listener, events = init_keyboard_listener()
     results = EvalResults()
 
     log_say("Starting evaluation", play_sounds)
 
     # Execute a warmup period to ensure everything is working properly
     log_say("Warmup period", play_sounds)
-    warmup_record(robot, events, False, warmup_time_s, display_cameras, fps)
+
+    action_features = hw_to_dataset_features(robot.action_features, "action", True)
+    obs_features = hw_to_dataset_features(robot.observation_features, "observation", True)
+    dataset_features = {**action_features, **obs_features}
+
+
+    control_loop(
+        robot=robot,
+        teleop=teleop,
+        control_time_s=warmup_time_s,
+        display_cameras=display_cameras,
+        events=events,
+        policy=None,
+        fps=fps,
+    )
 
     # Evaluate each test case
     for i, test_case in enumerate(test_cases):
@@ -218,6 +303,12 @@ def run_evaluation(
         print(
             f"\nRunning test case {i + 1}/{len(test_cases)}: {test_case.color} {test_case.shape} at location {test_case.location}")
         print(f"Expected dropoff: {test_case.expected_dropoff}")
+        single_task = None
+        if isinstance(policy, SmolVLAPolicy) or isinstance(policy, LAVACTPolicy):
+            single_task = f"Pickup {test_case.color} {test_case.shape} at {test_case.location} and drop it in {test_case.expected_dropoff}"
+            if generic_task:
+                single_task = "Pickup the object and drop it at the correct location"
+            print("SmolVLA Policy, setting task to:", single_task)
         input("Press Enter to continue...")
 
         # Reset events for this episode
@@ -230,12 +321,15 @@ def run_evaluation(
         # Use the control_loop function from control_utils to run the policy
         control_loop(
             robot=robot,
+            teleop=None,
+            dataset_features=dataset_features,
             control_time_s=episode_time_s,
             display_cameras=display_cameras,
             events=events,
             policy=policy,
             fps=fps,
-            teleoperate=False,
+            single_task=single_task
+
         )
 
         log_say("Episode complete. Please rate the performance.", play_sounds)
@@ -288,73 +382,24 @@ def run_evaluation(
         events["exit_early"] = False
 
         # Reset environment before next episode
-
         log_say("Reset environment for next test case", play_sounds)
         # Allow teleoperation during reset to position the robot correctly
-        warmup_record(robot, events, True, warmup_time_s=warmup_time_s, display_cameras=display_cameras, fps=fps)
+        control_loop(
+            robot=robot,
+            teleop=teleop,
+            control_time_s=warmup_time_s,
+            display_cameras=display_cameras,
+            events=events,
+            policy=None,
+            fps=fps,
+        )
         print("Robot reset\n")
 
     # Stop and clean up
     log_say("Evaluation complete", play_sounds)
-    stop_recording(robot, listener, display_cameras)
+    stop_recording(robot, listener, teleop)
 
     return results
-
-
-def on_key_press(key, events):
-    """Handle key presses for user feedback and control."""
-    try:
-        # Handle number keys for scoring
-        if hasattr(key, 'char') and key.char and key.char.isdigit():
-            score = int(key.char)
-            if 0 <= score <= 3:
-                events[f"score_{score}"] = True
-                return
-
-        # Handle special keys
-        if key == pynput.keyboard.Key.left:
-            events["rerecord_episode"] = True
-        elif key == pynput.keyboard.Key.right:
-            events["exit_early"] = True
-        elif key == pynput.keyboard.Key.esc:
-            events["stop_recording"] = True
-    except AttributeError:
-        # Handle special keys that don't have char attribute
-        if key == pynput.keyboard.Key.left:
-            events["rerecord_episode"] = True
-        elif key == pynput.keyboard.Key.right:
-            events["exit_early"] = True
-        elif key == pynput.keyboard.Key.esc:
-            events["stop_recording"] = True
-
-
-def extended_init_keyboard_listener():
-    """Initialize the keyboard listener with numerical scoring."""
-    events = {
-        "stop_recording": False,
-        "rerecord_episode": False,
-        "exit_early": False,
-        "score_0": False,
-        "score_1": False,
-        "score_2": False,
-        "score_3": False,
-    }
-
-    listener = pynput.keyboard.Listener(
-        on_press=lambda key: on_key_press(key, events)
-    )
-    listener.start()
-
-    return listener, events
-
-
-from lerobot.configs.default import DatasetConfig, EvalConfig, WandBConfig
-
-from lerobot.configs.policies import PreTrainedConfig
-from lerobot.configs.default import EvalConfig
-from lerobot.scripts.control_robot import ControlPipelineConfig
-from lerobot.common.robot_devices.robots.configs import RobotConfig
-import datetime as dt
 
 
 @dataclass
@@ -369,8 +414,10 @@ class EvalPipelineConfig:
     job_name: str | None = None
     seed: int | None = 1000
     robot: RobotConfig = None
-    control: ControlPipelineConfig = None
+    teleop: TeleoperatorConfig = None
     dataset: DatasetConfig = None
+    dataset_percent: int = 1.0 # Ugly fix
+    generic_task:bool = False
 
     def __post_init__(self):
         # HACK: We parse again the cli args here to get the pretrained path if there was one.
@@ -426,6 +473,9 @@ def eval_main(cfg: EvalPipelineConfig):
     logging.info("Creating robot.")
     robot = make_robot_from_config(cfg.robot)
 
+    logging.info("Creating teleop.")
+    teleop = make_teleoperator_from_config(cfg.teleop)
+
     # Loading TrainingDataset Meta:
     logging.info("Creating dataset")
     from lerobot.common.datasets.factory import make_dataset
@@ -445,9 +495,9 @@ def eval_main(cfg: EvalPipelineConfig):
     test_cases = get_test_cases()
     logging.info(f"Found {len(test_cases)} test cases")
 
-    # Override keyboard listener to handle scoring keys
-    global init_keyboard_listener
-    init_keyboard_listener = extended_init_keyboard_listener
+    policy_seed = cfg.job_name.split("_")[-1]
+    policy_percent = cfg.job_name.split("_")[-3]
+
 
     # Collect metadata
     metadata = {
@@ -465,6 +515,10 @@ def eval_main(cfg: EvalPipelineConfig):
         "policy_config": asdict(cfg.policy) if cfg.policy else None,
         "dataset_config": asdict(cfg.dataset) if cfg.dataset else None,
         "robot_config": asdict(cfg.robot) if cfg.robot else None,
+        "teleop_config": asdict(cfg.teleop) if cfg.teleop else None,
+        'policy_seed': policy_seed,
+        'policy_percent': policy_percent,
+
         "scoring_system": {
             "0": "Pick attempt failed (object not successfully grasped)",
             "1": "Successful pick but failed place attempt (object dropped or misplaced)",
@@ -477,6 +531,7 @@ def eval_main(cfg: EvalPipelineConfig):
     with torch.no_grad(), torch.autocast(device_type=device.type) if cfg.policy.use_amp else nullcontext():
         results = run_evaluation(
             robot=robot,
+            teleop=teleop,
             policy=policy,
             test_cases=test_cases,
             fps=30,
@@ -484,6 +539,7 @@ def eval_main(cfg: EvalPipelineConfig):
             episode_time_s=30,
             display_cameras=True,
             play_sounds=False,
+            generic_task=cfg.generic_task
         )
 
     # Set metadata in results

@@ -113,3 +113,39 @@ python examples/backward_compatibility/replay.py \
     --robot.id=so_100_follower \
     --dataset.repo_id=krallistic/so100_individual_cases_simple_with_concepts_yellow-cube-3-B \
     --dataset.episode=2
+
+
+python -m lerobot.find_port
+
+python -m lerobot.calibrate --robot.type=so101_follower --robot.port=/dev/ttyACM1 --robot.id=so101_follower 
+
+python -m lerobot.calibrate --teleop.type=so101_leader --teleop.port=/dev/ttyACM0 --teleop.id=so101_leader 
+
+python -m lerobot.teleoperate \
+    --robot.type=so101_follower \
+    --robot.port=/dev/ttyACM0 \
+    --robot.id=so101_follower \
+    --robot.cameras="{ hand: {type: opencv, index_or_path: 0, width: 480, height: 640, fps: 30, rotation: -90}, scene: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30}}" \
+    --teleop.type=so101_leader \
+    --teleop.port=/dev/ttyACM1 \
+    --teleop.id=so101_leader \
+    --fps=30 \
+    --display_data=true
+
+
+python -m lerobot.record \
+    --robot.type=so101_follower \
+    --robot.port=/dev/ttyACM0 \
+    --robot.id=so101_follower \
+    --robot.cameras="{ hand: {type: opencv, index_or_path: 0, width: 480, height: 640, fps: 30, rotation: -90}, scene: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30}}" \
+    --teleop.type=so101_leader \
+    --teleop.port=/dev/ttyACM0 \
+    --teleop.id=so101_leader \
+    --display_data=False \
+    --dataset.repo_id=${HF_USER}/new_setup_test2 \
+    --dataset.push_to_hub=False \
+    --dataset.episode_time_s=30 \
+    --dataset.reset_time_s=20 \
+    --dataset.num_episodes=3 \
+    --dataset.single_task="Test"
+

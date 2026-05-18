@@ -16,6 +16,7 @@
 from typing import Any
 
 from lerobot.common.utils.utils import format_big_number
+import torch
 
 
 class AverageMeter:
@@ -149,12 +150,17 @@ class MetricsTracker:
         """
         Returns the current metric values (or averages if `use_avg=True`) as a dict.
         """
+
+        def to_numpy_if_tensor(x):
+            if isinstance(x, torch.Tensor):
+                return x.sum().detach().cpu().numpy()
+            return x
         return {
             "steps": self.steps,
             "samples": self.samples,
             "episodes": self.episodes,
             "epochs": self.epochs,
-            **{k: m.avg if use_avg else m.val for k, m in self.metrics.items()},
+            **{k: to_numpy_if_tensor(m.avg) if use_avg else m.val for k, m in self.metrics.items()},
         }
 
     def reset_averages(self) -> None:

@@ -8,15 +8,14 @@ sudo chmod a+rw /dev/ttyACM1
 sudo chmod a+rw /dev/ttyACM0
 
 # Configuration variables
-CHECKPOINTS=true  # Set to true to evaluate all checkpoints, false for latest checkpoint only
-BASE_JOB_NAME="concept_act_so100_30krun"
-BASE_JOB_NAME="act_normal_so100_30krun"
-BASE_JOB_NAME="concept_act_prediction_head_so100_30krun"
+CHECKPOINTS=false  # Set to true to evaluate all checkpoints, false for latest checkpoint only
+GENERIC_TASK=true  # Set to true to add "_generic_task" suffix and pass --generic_task=True flag
+BASE_JOB_NAME="lavact_so101_10epoch"
 
 #BASE_JOB_NAME="act_normal_so100_more_heads"
 BASE_OUTPUT_DIR="outputs/train"
 DEVICE="cuda"
-ROBOT_TYPE="so100"
+ROBOT_TYPE="so101"
 N_EPISODES=10
 
 echo "=================================="
@@ -24,9 +23,10 @@ echo "Robot Evaluation Script"
 echo "=================================="
 echo "Base model pattern: $BASE_JOB_NAME"
 echo "Checkpoint evaluation mode: $CHECKPOINTS"
+echo "Generic task mode: $GENERIC_TASK"
 echo "=================================="
 
-DATASET_PREFIX="individual_cases_simple_with_concepts"
+DATASET_PREFIX="so101_individual_cases_new_with_concepts"
 
 # Get Hugging Face username
 HF_USER=$(huggingface-cli whoami | head -n 1)
@@ -51,6 +51,11 @@ echo $DATASET_LIST
 
 # Create base evaluation output directory (organized by base job name only)
 EVAL_BASE_DIR="outputs/eval/${BASE_JOB_NAME}"
+
+# Add "_generic_task" suffix if GENERIC_TASK is true
+if [ "$GENERIC_TASK" = true ]; then
+    EVAL_BASE_DIR="${EVAL_BASE_DIR}_generic_task"
+fi
 
 echo "Using evaluation output directory: $EVAL_BASE_DIR"
 mkdir -p "$EVAL_BASE_DIR"
@@ -126,15 +131,29 @@ run_single_evaluation() {
 
     echo "Job name: $job_name"
 
-    # Run the evaluation
-    python cact_scripts/eval.py \
-        --policy.path="$model_path" \
-        --robot.type="$ROBOT_TYPE" \
-        --policy.device="$DEVICE" \
-        --job_name="$job_name" \
+    # Build the Python command
+    local python_cmd="python cact_scripts/eval.py \
+        --robot.type=so101_follower \
+        --robot.port=/dev/ttyACM0 \
+        --robot.id=so101_follower \
+        --robot.cameras=\"{ hand: {type: opencv, index_or_path: 2, width: 480, height: 640, fps: 30, rotation: -90}, scene: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}\" \
+        --teleop.type=so101_leader \
+        --teleop.port=/dev/ttyACM1 \
+        --teleop.id=so101_leader \
+        --policy.path=\"$model_path\" \
+        --policy.device=\"$DEVICE\" \
+        --job_name=\"$job_name\" \
         --dataset.repo_id=$DATASET_LIST \
-        --output_dir="$EVAL_BASE_DIR" \
-        --output_filename="$output_filename"
+        --output_dir=\"$EVAL_BASE_DIR\" \
+        --output_filename=\"$output_filename\""
+
+    # Add generic_task flag if enabled
+    if [ "$GENERIC_TASK" = true ]; then
+        python_cmd="$python_cmd --generic_task=True"
+    fi
+
+    # Run the evaluation
+    eval $python_cmd
 
     # Check if evaluation was successful
     if [ -f "$output_file_path" ]; then

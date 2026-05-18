@@ -35,6 +35,11 @@ from lerobot.common.policies.vqbet.configuration_vqbet import VQBeTConfig
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType
 
+from lerobot.common.policies.act.configuration_concept_act import ConceptACTConfig
+from lerobot.common.policies.act.configuration_lavact import LAVACTConfig
+
+
+
 
 def get_policy_class(name: str) -> PreTrainedPolicy:
     """Get the policy's class and config class given a name (matching the policy class' `name` attribute)."""
@@ -54,6 +59,10 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
         from lerobot.common.policies.act.modeling_concept_act import ConceptACTPolicy
 
         return ConceptACTPolicy
+    elif name == "lavact":
+        from lerobot.common.policies.act.modeling_lavact import LAVACTPolicy
+
+        return LAVACTPolicy
     elif name == "vqbet":
         from lerobot.common.policies.vqbet.modeling_vqbet import VQBeTPolicy
 
@@ -90,7 +99,9 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
     elif policy_type == "act":
         return ACTConfig(**kwargs)
     elif policy_type == "concept_act":
-        return ACTConfig(**kwargs)  # ConceptACT uses the ACTConfig
+        return ConceptACTConfig(**kwargs)  # ConceptACT uses the ACTConfig
+    elif policy_type == "lavact":
+        return LAVACTConfig(**kwargs)
     elif policy_type == "vqbet":
         return VQBeTConfig(**kwargs)
     elif policy_type == "pi0":

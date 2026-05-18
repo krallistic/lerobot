@@ -1,5 +1,21 @@
 #!/bin/bash
 
+# Configuration variables
+DATASET_PREFIX="so101_individual_cases_new"
+
+
+BASE_JOB_NAME="normal_act_so101__10epoch"
+BASE_OUTPUT_DIR="outputs/train/${BASE_JOB_NAME}"
+DEVICE="cuda"  # Use "cuda" for GPU or "cpu" for CPU
+
+# Random seeds to loop over
+SEEDS=(42 123 456 100 101 102 103 104 105 106)
+
+PERCENTS=(0.2 0.4 0.6 0.8 1.0)
+
+
+ENABLE_WANDB=true  # Set to true to enable Weights & Biases logging
+
 # Set library path to include conda environment libraries
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 
@@ -7,16 +23,9 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 HF_USER=$(huggingface-cli whoami | head -n 1)
 echo "Logged in as: $HF_USER"
 
-BASE_JOB_NAME="act_normal_so100_30krun"
-BASE_OUTPUT_DIR="outputs/train/${BASE_JOB_NAME}"
-
-# Random seeds to loop over
-SEEDS=(42 123 456)
-SEEDS=(100 101 102 103 104)
-
-echo "Collecting Datasets"
-# List directories, grep for _simple, and remove trailing slashes
-DATASETS_NAME=$(ls -l ~/.cache/huggingface/lerobot/${HF_USER}/ | grep _simple |  grep -v concept | awk '{print $NF}' | sed 's/\/$//')
+echo "Collecting concept datasets"
+# List directories matching our prefix and remove trailing slashes
+DATASETS_NAME=$(ls -l ~/.cache/huggingface/lerobot/${HF_USER}/ | grep $DATASET_PREFIX | grep -v concepts | awk '{print $NF}' | sed 's/\/$//')
 
 echo "Building dataset list"
 # Build a comma-separated list of datasets with the user prefix
@@ -30,44 +39,46 @@ for dataset in $DATASETS_NAME; do
 done
 
 echo "Dataset list: $DATASET_LIST"
-ENABLE_WANDB=true  # Set to true to enable Weights & Biases logging
 
-LEARNING_RATE=1e-5
+LEARNING_RATE=3e-5
 BATCH_SIZE=8
 STEPS=30000
 
 # Loop over each seed
 for SEED in "${SEEDS[@]}"; do
-  echo "Starting training with seed $SEED"
-  
-  # Update job name and output directory to include seed
-  JOB_NAME="${BASE_JOB_NAME}_seed${SEED}"
-  OUTPUT_DIR="${BASE_OUTPUT_DIR}_seed${SEED}"
-  
-  # Set up wandb flag
-  WANDB_FLAG="--wandb.enable=false"
-  if [ "$ENABLE_WANDB" = true ]; then
-      WANDB_FLAG="--wandb.enable=true --wandb.disable_artifact=true --wandb.run_id=${JOB_NAME}"
-      echo "Weights & Biases logging enabled"
-  fi
+  for PERCENT in "${PERCENTS[@]}"; do
+    echo "Starting training with seed $SEED and $PERCENT"
 
-  echo "Training with seed $SEED"
-  python lerobot/scripts/train.py \
-    --dataset.repo_id=$DATASET_LIST \
-    --policy.type=act \
-    --output_dir=${OUTPUT_DIR} \
-    --job_name=${JOB_NAME} \
-    --policy.device=cuda \
-    --policy.optimizer_lr=$LEARNING_RATE \
-    --batch_size=$BATCH_SIZE \
-    --steps=$STEPS \
-    --policy.n_heads=16 \
-    --log_freq=2000 \
-    --save_freq=3000 \
-    --seed=$SEED \
-    $WANDB_FLAG
-    
-  echo "Completed training with seed $SEED"
-done
+    # Update job name and output directory to include seed
+    JOB_NAME="${BASE_JOB_NAME}_percent_${PERCENT}_seed_${SEED}"
+    OUTPUT_DIR="${BASE_OUTPUT_DIR}_percent_${PERCENT}_seed_${SEED}"
+
+    # Set up wandb flag
+    WANDB_FLAG="--wandb.enable=false"
+    if [ "$ENABLE_WANDB" = true ]; then
+        WANDB_FLAG="--wandb.enable=true --wandb.disable_artifact=true --wandb.run_id=${JOB_NAME}"
+        echo "Weights & Biases logging enabled"
+    fi
+
+    echo "Training with seed $SEED"
+    python lerobot/scripts/train.py \
+      --dataset.repo_id=$DATASET_LIST \
+      --policy.type=act \
+      --output_dir=${OUTPUT_DIR} \
+      --job_name=${JOB_NAME} \
+      --policy.device=cuda \
+      --policy.optimizer_lr=$LEARNING_RATE \
+      --batch_size=$BATCH_SIZE \
+      --epochs=10 \
+      --dataset_percent=$PERCENT \
+      --policy.n_heads=16 \
+      --log_freq=10000 \
+      --save_freq=0 \
+      --seed=$SEED \
+      $WANDB_FLAG
+
+    echo "Completed training with seed $SEED and $PERCENT"
+    done
+  done
 
 echo "All training runs completed!"

@@ -1,17 +1,17 @@
 #!/bin/bash
 
 # Configuration variables
-DATASET_PREFIX="individual_cases_simple_with_concepts"
+DATASET_PREFIX="so101_individual_cases_new_with_concepts"
 
 
-BASE_JOB_NAME="concept_act_so100_testafterupdate"
+BASE_JOB_NAME="concept_act_so101_single_head_ce_dev2"
 BASE_OUTPUT_DIR="outputs/train/${BASE_JOB_NAME}"
 DEVICE="cuda"  # Use "cuda" for GPU or "cpu" for CPU
 
 # Random seeds to loop over
 SEEDS=(42 123 456)
 #SEEDS=(100 101 102 103 104)
-SEEDS(42)
+SEEDS=(42)
 
 CONCEPT_WEIGHT=0.1  # Weight for concept loss component
 ENABLE_WANDB=true  # Set to true to enable Weights & Biases logging
@@ -69,10 +69,11 @@ for SEED in "${SEEDS[@]}"; do
       --policy.concept_weight=$CONCEPT_WEIGHT \
       --policy.optimizer_lr=$LEARNING_RATE \
       --batch_size=$BATCH_SIZE \
-      --steps=$STEPS \
+      --epochs=5 \
+      --dataset_percent=0.2 \
       --policy.use_concept_learning=true \
-      --policy.concept_method=transformer_bce \
-      --policy.use_rbf_head_selection=false \
+      --policy.concept_method=transformer_ce \
+      --policy.use_class_aware_concepts=true \
       --policy.n_heads=16 \
       --log_freq=3000 \
       --save_freq=20000 \
