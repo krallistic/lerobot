@@ -4,7 +4,7 @@
 DATASET_PREFIX="so101_individual_cases_new"
 
 
-BASE_JOB_NAME="normal_act_so101__10epoch"
+BASE_JOB_NAME="lavact_so101_10epoch"
 BASE_OUTPUT_DIR="outputs/train/${BASE_JOB_NAME}"
 DEVICE="cuda"  # Use "cuda" for GPU or "cpu" for CPU
 
@@ -63,7 +63,7 @@ for SEED in "${SEEDS[@]}"; do
     echo "Training with seed $SEED"
     python lerobot/scripts/train.py \
       --dataset.repo_id=$DATASET_LIST \
-      --policy.type=act \
+      --policy.type=lavact \
       --output_dir=${OUTPUT_DIR} \
       --job_name=${JOB_NAME} \
       --policy.device=cuda \

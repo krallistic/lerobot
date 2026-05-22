@@ -27,6 +27,7 @@ Example usage:
 import argparse
 import logging
 import os
+from os.path import basename
 from pathlib import Path
 import shutil
 import tempfile
@@ -50,36 +51,31 @@ def create_feature_configurations() -> Dict[str, Dict[str, Any]]:
     # Define possible values for each feature (based on cases.sh)
     all_colors = ["red", "green", "yellow", "blue"]
     all_shapes = ["cube", "rectangle", "cylinder"]
-    all_locations = ["1", "2", "3", "4", "5"]
-    all_dropoffs = ["A", "B"]
-    
+    all_orderings = ["123", "231", "312"]
+
     # Create the configurations dictionary
-    feature_configs = {
-        "concept_color": {
+    feature_configs = {}
+    for i, obj in enumerate(["object"] * 3):
+        basename = obj + "_" + str(i)
+        feature_configs[basename + "_color"] = {
             "dtype": "int64",
             "shape": (len(all_colors),),
             "names": [f"concept_color_{color}" for color in all_colors],
             "values": all_colors,
-        },
-        "concept_shape": {
+        }
+        feature_configs[basename + "_shape"] = {
             "dtype": "int64",
             "shape": tuple([len(all_shapes)]),
             "names": [f"concept_shape_{shape}" for shape in all_shapes],
             "values": all_shapes,
-        },
-        "concept_location": {
+        }
+
+    feature_configs["concept_ordering"] = {
             "dtype": "int64",
-            "shape": tuple([len(all_locations)]),
-            "names": [f"concept_location_{location}" for location in all_locations],
-            "values": all_locations,
-        },
-        "concept_dropoff": {
-            "dtype": "int64",
-            "shape": tuple([len(all_dropoffs)]),
-            "names": [f"concept_dropoff_{dropoff}" for dropoff in all_dropoffs],
-            "values": all_dropoffs,
-        },
-    }
+            "shape": tuple([len(all_orderings)]),
+            "names": [f"ordering_{order}" for order in all_orderings],
+            "values": all_orderings,
+        }
     
     return feature_configs
 
@@ -102,7 +98,6 @@ def extract_features_from_metadata(
     """
     # Initialize dictionary for new features
     new_features = {}
-
     # Get information from dataset metadata
     for episode_index in range(dataset.meta.total_episodes):
         # Get episode metadata
@@ -118,36 +113,42 @@ def extract_features_from_metadata(
         tasks = episode_data.get("tasks", [])
 
         if tasks:
-            # Parse the task description (Format: "Pickup $color $shape at $location and drop it in $dropoff")
+            # Parse the task description (Format: "'Sort three randomly placed objects into correct order': 'red rectangle in position 1, then green cube in position 2, then yellow cube in position 3'")
             task_description = tasks[0]  # Assuming one task per episode
+            import itertools
 
-            # Extract color and shape from the beginning part
-            pickup_part = task_description.split("Pickup ")[1].split(" at ")[0].strip()
-            words = pickup_part.split()
+            orderings = itertools.cycle(feature_configs['concept_ordering']['values'])
 
-            # Extract color (first word)
-            color_part = words[0]
-            values = feature_configs["concept_color"]["values"]
-            if color_part in values:
-                feature_vectors["concept_color"][values.index(color_part)] = 1
+            task_description = task_description.split(":")[1].replace("'", "").strip()
+            object_1 = task_description.split(" ")[0], task_description.split(" ")[1]
+            object_2 = task_description.split(" ")[6], task_description.split(" ")[7]
+            object_3 = task_description.split(" ")[12], task_description.split(" ")[13]
 
-            # Extract shape (second word)
-            shape_part = words[1]
-            values = feature_configs["concept_shape"]["values"]
-            if shape_part in values:
-                feature_vectors["concept_shape"][values.index(shape_part)] = 1
+            objects_in_scene = itertools.cycle([object_1, object_2, object_3])
 
-            # Extract location (pickup)
-            location_part = task_description.split(" at ")[1].split(" and drop it in ")[0].strip()
-            values = feature_configs["concept_location"]["values"]
-            if location_part in values:
-                feature_vectors["concept_location"][values.index(location_part)] = 1
 
-            # Extract dropoff
-            dropoff_part = task_description.split(" and drop it in ")[1].strip()
-            values = feature_configs["concept_dropoff"]["values"]
-            if dropoff_part in values:
-                feature_vectors["concept_dropoff"][values.index(dropoff_part)] = 1
+            for i in range(episode_index):
+                next(orderings)
+                next(orderings)
+
+                next(objects_in_scene)
+                next(objects_in_scene)
+
+            current_ordering = next(orderings)
+            current_object_1 = next(objects_in_scene)
+            current_object_2 = next(objects_in_scene)
+            current_object_3 = next(objects_in_scene)
+
+            current_objects = [current_object_1, current_object_2, current_object_3]
+
+            feature_vectors["concept_ordering"][feature_configs["concept_ordering"]["values"].index(current_ordering)] = 1
+
+            for i in range(3):
+                basename = "object" + "_" + str(i)
+
+                feature_vectors[basename + "_color"][feature_configs[basename + "_color"]["values"].index(current_objects[i][0])] = 1
+                feature_vectors[basename + "_shape"][feature_configs[basename + "_shape"]["values"].index(current_objects[i][1])] = 1
+
 
         # Create a dictionary of new features for this episode
         new_features[episode_index] = feature_vectors

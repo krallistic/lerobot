@@ -11,217 +11,7 @@ import torch
 import torch.nn as nn
 from typing import Callable
 
-
-class RBFLayer(nn.Module):
-    """
-    Defines a Radial Basis Function Layer that handles arbitrary batch dimensions
-
-    An RBF network output is given by:
-    y(x) = sum_{i=1}^N w_i * phi(eps_i * ||x - c_i||)
-
-    Parameters
-    ----------
-        in_features_dim: int
-            Dimensionality of the input features
-        num_kernels: int
-            Number of RBF kernels to use
-        out_features_dim: int
-            Dimensionality of the output features
-        rbf_type: str
-            Type of RBF kernel function. Options: 'gaussian', 'multiquadric',
-            'inverse_quadratic', 'thin_plate_spline'
-        norm_function: Callable[[torch.Tensor], torch.Tensor], optional
-            Norm function for distance computation (default: L2 norm)
-        normalization: bool, optional
-            If True, normalizes RBF outputs to sum to 1 (default: True)
-    """
-
-    # Available RBF functions
-    RBF_FUNCTIONS = {
-        'gaussian': lambda r: torch.exp(-r ** 2),
-        'multiquadric': lambda r: 1.0 / torch.sqrt(1 + r ** 2),
-        'inverse_quadratic': lambda r: 1.0 / (1 + r ** 2),
-        'thin_plate_spline': lambda r: torch.where(r > 0, r ** 2 * torch.log(r + 1e-10), torch.zeros_like(r))
-    }
-
-    def __init__(self,
-                 in_features_dim: int,
-                 num_kernels: int,
-                 out_features_dim: int,
-                 rbf_type: str = 'gaussian',
-                 norm_function: Callable[[torch.Tensor], torch.Tensor] = None,
-                 normalization: bool = True):
-        super(RBFLayer, self).__init__()
-
-        self.in_features_dim = in_features_dim
-        self.num_kernels = num_kernels
-        self.out_features_dim = out_features_dim
-        self.rbf_type = rbf_type
-        self.normalization = normalization
-
-        # Set RBF function based on string parameter
-        if rbf_type not in self.RBF_FUNCTIONS:
-            raise ValueError(f"Unknown RBF type: {rbf_type}. Available options: {list(self.RBF_FUNCTIONS.keys())}")
-        self.radial_function = self.RBF_FUNCTIONS[rbf_type]
-
-        # Default to L2 norm if none provided
-        if norm_function is None:
-            self.norm_function = lambda x: torch.norm(x, dim=-1)
-        else:
-            self.norm_function = norm_function
-
-        # Initialize parameters
-        self.kernels_centers = nn.Parameter(
-            torch.zeros(num_kernels, in_features_dim, dtype=torch.float32))
-
-        self.log_shapes = nn.Parameter(
-            torch.zeros(num_kernels, dtype=torch.float32))
-
-        self.weights = nn.Parameter(
-            torch.zeros(out_features_dim, num_kernels, dtype=torch.float32))
-
-        self.reset()
-
-    def reset(self,
-              upper_bound_kernels: float = 1.0,
-              std_shapes: float = 0.1,
-              gain_weights: float = 1.0) -> None:
-        """
-        Resets all parameters to random initial values
-
-        Parameters
-        ----------
-            upper_bound_kernels: float
-                Range for uniform initialization of kernel centers [-x, x]
-            std_shapes: float
-                Standard deviation for normal initialization of log-shape parameters
-            gain_weights: float
-                Gain for Xavier uniform initialization of weights
-        """
-        nn.init.uniform_(self.kernels_centers,
-                         a=-upper_bound_kernels,
-                         b=upper_bound_kernels)
-        nn.init.normal_(self.log_shapes, mean=0.0, std=std_shapes)
-        nn.init.xavier_uniform_(self.weights, gain=gain_weights)
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass supporting arbitrary leading batch dimensions
-
-        Parameters
-        ----------
-            input: torch.Tensor
-                Input tensor of shape (..., in_features_dim) where ...
-                represents any number of leading dimensions
-
-        Returns
-        -------
-            out: torch.Tensor
-                Output tensor of shape (..., out_features_dim)
-        """
-        # Store original shape for later reshaping
-        original_shape = input.shape[:-1]  # All dims except last
-        feature_dim = input.shape[-1]
-
-        assert feature_dim == self.in_features_dim, \
-            f"Expected input feature dim {self.in_features_dim}, got {feature_dim}"
-
-        # Flatten leading dimensions: (..., in_features) -> (N, in_features)
-        input_flat = input.view(-1, self.in_features_dim)
-        batch_size = input_flat.size(0)
-
-        # Compute differences from centers
-        # input_flat: (N, in_features_dim)
-        # kernels_centers: (num_kernels, in_features_dim)
-        input_expanded = input_flat.unsqueeze(1)  # (N, 1, in_features_dim)
-        centers_expanded = self.kernels_centers.unsqueeze(0)  # (1, num_kernels, in_features_dim)
-
-        diff = input_expanded - centers_expanded  # (N, num_kernels, in_features_dim)
-
-        # Apply norm function: (N, num_kernels, in_features_dim) -> (N, num_kernels)
-        r = self.norm_function(diff)
-
-        # Apply shape parameters: (N, num_kernels)
-        shapes = self.log_shapes.exp()  # (num_kernels,)
-        eps_r = shapes.unsqueeze(0) * r  # (1, num_kernels) * (N, num_kernels)
-
-        # Apply radial basis function: (N, num_kernels)
-        rbfs = self.radial_function(eps_r)
-
-        # Apply normalization if requested
-        if self.normalization:
-            # Prevent division by zero
-            rbf_sums = rbfs.sum(dim=-1, keepdim=True) + 1e-9  # (N, 1)
-            rbfs = rbfs / rbf_sums  # (N, num_kernels)
-
-        # Linear combination with weights
-        # weights: (out_features_dim, num_kernels)
-        # rbfs: (N, num_kernels)
-        out_flat = torch.matmul(rbfs, self.weights.t())  # (N, out_features_dim)
-
-        # Reshape back to original leading dimensions
-        output_shape = original_shape + (self.out_features_dim,)
-        out = out_flat.view(output_shape)
-
-        return out
-
-    @property
-    def get_kernels_centers(self):
-        """Returns the centers of the kernels"""
-        return self.kernels_centers.detach()
-
-    @property
-    def get_weights(self):
-        """Returns the linear combination weights"""
-        return self.weights.detach()
-
-    @property
-    def get_shapes(self):
-        """Returns the shape parameters"""
-        return self.log_shapes.detach().exp()
-
-class RBFActivation(nn.Module):
-    def __init__(self, input_dim, n_centers=None, rbf_type='gaussian'):
-        super().__init__()
-        # Default: use input_dim // 4 centers (more reasonable compression)
-        if n_centers is None:
-            n_centers = max(1, input_dim // 4)
-
-        self.input_dim = input_dim
-        self.n_centers = n_centers
-        self.centers = nn.Parameter(torch.randn(n_centers, input_dim))
-        self.gamma = nn.Parameter(torch.ones(n_centers) * 1.5)  # Even wider
-        self.rbf_type = rbf_type
-
-    def forward(self, x):
-        # x can be any shape (..., input_dim)
-        # We want output (..., n_centers)
-
-        original_shape = x.shape[:-1]  # All dimensions except last
-        feature_dim = x.shape[-1]
-
-        # Flatten all leading dimensions
-        x_flat = x.view(-1, feature_dim)  # (N, input_dim) where N = prod(leading_dims)
-
-        # Expand for distance computation
-        x_expanded = x_flat.unsqueeze(1)  # (N, 1, input_dim)
-        centers_expanded = self.centers.unsqueeze(0)  # (1, n_centers, input_dim)
-
-        # Compute distances
-        distances = torch.norm(x_expanded - centers_expanded, dim=-1)  # (N, n_centers)
-
-        # Apply RBF kernel
-        if self.rbf_type == 'gaussian':
-            activations = torch.exp(-self.gamma * distances ** 2)
-        elif self.rbf_type == 'multiquadric':
-            activations = 1.0 / torch.sqrt(1 + self.gamma * distances ** 2)
-
-        # Reshape back to original leading dimensions + n_centers
-        output_shape = original_shape + (self.n_centers,)
-        activations = activations.view(output_shape)
-
-        return activations  # (..., n_centers)
-
+from lerobot.common.policies.act.concept_layers import ConceptACTEncoderLayer, ClassAwareConceptACTEncoderLayer, RBFLayer
 
 class ConceptACTPolicy(ACTPolicy):
     """ACT Policy with concept learning capabilities.
@@ -266,6 +56,7 @@ class ConceptACTPolicy(ACTPolicy):
         # Define your module types
         CONCEPT_MODULE_TYPES = (
             ConceptACTEncoderLayer,
+            ClassAwareConceptACTEncoderLayer,
             # Add your actual concept module classes here
         )
 
@@ -283,8 +74,78 @@ class ConceptACTPolicy(ACTPolicy):
         return [
             {'params': other_params, 'lr': self.config.optimizer_lr},
             {'params': concept_params, 'lr': self.config.optimizer_lr * 10.0},
-            {'params': rbf_params, 'lr': self.config.optimizer_lr * 10000.0}
+            {'params': rbf_params, 'lr': self.config.optimizer_lr * 100.0}
         ]
+
+    def _calculate_concept_metrics(self, predictions, targets, method_type="binary"):
+        """Calculate detailed metrics for concept predictions.
+
+        Args:
+            predictions: Model predictions (format depends on method_type)
+            targets: Ground truth targets (format depends on method_type)
+            method_type: One of "binary", "softmax", "mse", "binary_onehot" to handle different prediction formats
+
+        Returns:
+            Dictionary of calculated metrics
+        """
+        with torch.no_grad():
+            if method_type == "softmax":
+                # For softmax outputs (prediction_head, transformer_ce)
+                probs = F.softmax(predictions, dim=-1)
+                binary_predictions = (probs > 0.5).float()
+                binary_targets = targets.float()
+
+            elif method_type == "binary":
+                # For sigmoid outputs (transformer_bce)
+                probs = torch.sigmoid(predictions)
+                binary_predictions = (probs > 0.5).float()
+                binary_targets = targets.float()
+
+            elif method_type == "binary_onehot":
+                # For one-hot encoded predictions and targets
+                binary_predictions = predictions.float()
+                binary_targets = targets.float()
+                # For probability statistics, we'll use the predictions directly
+                # since they're already in [0,1] range (one-hot encoded)
+                probs = predictions.float()
+
+            elif method_type == "mse":
+                # For MSE outputs (transformer)
+                probs = torch.clamp(predictions, 0, 1)
+                binary_predictions = (predictions > 0.5).float()
+                binary_targets = (targets > 0.5).float()
+
+            # Calculate core metrics
+            true_positives = (binary_predictions * binary_targets).sum()
+            predicted_positives = binary_predictions.sum()
+            actual_positives = binary_targets.sum()
+            total_elements = binary_targets.numel()
+            correct_predictions = (binary_predictions == binary_targets).float().sum()
+
+            # Avoid division by zero
+            precision = (true_positives / predicted_positives).item() if predicted_positives > 0 else 0.0
+            recall = (true_positives / actual_positives).item() if actual_positives > 0 else 0.0
+            f1_score = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+            accuracy = (correct_predictions / total_elements).item()
+
+            # Probability statistics
+            mean_prob_positive = probs[binary_targets == 1].mean().item() if (binary_targets == 1).any() else 0.0
+            mean_prob_negative = probs[binary_targets == 0].mean().item() if (binary_targets == 0).any() else 0.0
+
+            return {
+                "concept_precision": precision,
+                "concept_recall": recall,
+                "concept_f1": f1_score,
+                "concept_accuracy": accuracy,
+                "mean_prob_positive": mean_prob_positive,
+                "mean_prob_negative": mean_prob_negative,
+                "num_predicted_positive": predicted_positives.item(),
+                "num_actual_positive": actual_positives.item(),
+                "num_true_positive": true_positives.item(),
+                "mean_concept_hat": predictions.mean().item(),
+                "mean_concept_target": binary_targets.mean().item(),
+                "sum_targets_per_batch": binary_targets.sum().item(),
+            }
 
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
@@ -295,22 +156,22 @@ class ConceptACTPolicy(ACTPolicy):
             batch["observation.images"] = [batch[key] for key in self.config.image_features]
 
         batch = self.normalize_targets(batch)
-        
+
         # Call the model with different outputs based on whether concept learning is enabled
         if self.config.use_concept_learning:
             actions_hat, (mu_hat, log_sigma_x2_hat), concepts_hat = self.model(batch)
         else:
             actions_hat, (mu_hat, log_sigma_x2_hat) = self.model(batch)
-            
+
         # Calculate action reconstruction loss - common for all configurations
         l1_loss = (
-            F.l1_loss(batch["action"], actions_hat, reduction="none") * ~batch["action_is_pad"].unsqueeze(-1)
+                F.l1_loss(batch["action"], actions_hat, reduction="none") * ~batch["action_is_pad"].unsqueeze(-1)
         ).mean()
-        
+
         # Initialize loss dictionary with L1 loss
         loss_dict = {"l1_loss": l1_loss.item()}
         total_loss = l1_loss
-        
+
         # Add concept loss if concept learning is enabled
         if self.config.use_concept_learning and self.config.concept_method == "prediction_head":
             concept_loss = 0.0
@@ -332,14 +193,24 @@ class ConceptACTPolicy(ACTPolicy):
                     concept_loss += ce_loss
                     loss_dict[f"{concept_type}_loss"] = ce_loss.item()
 
-            # Add the total concept loss to the overall loss
+            #For logging
+            all_logits = torch.cat([concepts_hat[k] for k in sorted(concepts_hat.keys())], dim=-1)
+            all_targets = torch.cat([batch[k] for k in sorted(self.config.concept_types.keys())], dim=-1)
+
+            # Calculate detailed metrics
+            concept_metrics = self._calculate_concept_metrics(all_logits, all_targets, method_type="softmax")
+            loss_dict.update(concept_metrics)
+
             loss_dict["concept_loss"] = concept_loss.item()
             total_loss = total_loss + concept_loss * self.config.concept_weight
 
         elif self.config.use_concept_learning and self.config.concept_method == "transformer_ce":
-            # TODO add NORM loss
             start = 0
             concept_loss = 0.0
+
+            # Lists to collect predictions and targets for metrics calculation
+            all_class_predictions = []
+            all_class_targets = []
 
             for concept_class in self.config.concept_types.keys():
                 targets = batch[concept_class]
@@ -350,18 +221,43 @@ class ConceptACTPolicy(ACTPolicy):
                 # Calculate cross-entropy loss (assuming targets are one-hot encoded)
                 # For one-hot targets, we need to convert to class indices for cross-entropy
                 if targets.dim() > 1 and targets.shape[-1] > 1:  # One-hot encoded
-                    targets = targets.argmax(dim=-1)
-                ce_loss = F.cross_entropy(current_concept_class_hat,  targets)
+                    target_indices = targets.argmax(dim=-1)
+                else:
+                    target_indices = targets
+
+                ce_loss = F.cross_entropy(current_concept_class_hat, target_indices, label_smoothing=0.1)
                 concept_loss += ce_loss
+
+                # Convert predictions to one-hot format for metrics
+                # Apply softmax to get probabilities, then argmax to get predicted classes
+                class_probs = F.softmax(current_concept_class_hat, dim=-1)
+                predicted_classes = class_probs.argmax(dim=-1)
+
+                # Convert to one-hot format
+                predicted_onehot = F.one_hot(predicted_classes, num_classes=current_concept_class_size).float()
+
+                # Collect for overall metrics
+                all_class_predictions.append(predicted_onehot)
+                all_class_targets.append(targets.float())
 
                 start = start + current_concept_class_size
 
+            # Concatenate all predictions and targets
+            all_predictions_onehot = torch.cat(all_class_predictions, dim=-1)
+            all_targets_onehot = torch.cat(all_class_targets, dim=-1)
+
+            # Calculate metrics using one-hot predictions and targets (binary method is appropriate here)
+            concept_metrics = self._calculate_concept_metrics(
+                all_predictions_onehot, all_targets_onehot, method_type="binary_onehot"
+            )
+
+            loss_dict.update(concept_metrics)
             loss_dict["concept_loss"] = concept_loss.item()
             total_loss = total_loss + concept_loss * self.config.concept_weight
+
         elif self.config.use_concept_learning and self.config.concept_method == "transformer_bce":
             # Concatenate all targets into a single multi-label tensor
             all_targets = torch.concatenate([batch[key] for key, value in sorted(self.config.concept_types.items())], dim=-1).float()
-
 
             # Calculate pos_weight dynamically
             number_of_positive = len(self.config.concept_types.keys())
@@ -369,11 +265,6 @@ class ConceptACTPolicy(ACTPolicy):
             pos_weight_value = number_of_negative / number_of_positive
             pos_weight = torch.tensor([pos_weight_value] * all_targets.shape[-1], device=all_targets.device)
 
-            # DEBUG: Let's see what the raw logits look like
-            #with torch.no_grad():
-            #    print(f"Raw logits stats: mean={concepts_hat.mean().item():.3f}, std={concepts_hat.std().item():.3f}")
-            #    print(f"Raw logits range: min={concepts_hat.min().item():.3f}, max={concepts_hat.max().item():.3f}")
-            #    print(f"Target sum per batch: {all_targets.sum(dim=1)}")  # Should be [3, 3, 3, ...] for each batch
 
             # Apply BCE loss with positive weighting
             concept_loss = F.binary_cross_entropy_with_logits(
@@ -382,60 +273,36 @@ class ConceptACTPolicy(ACTPolicy):
                 pos_weight=pos_weight
             )
 
-            # Add detailed logging
-            with torch.no_grad():
-                probs = torch.sigmoid(concepts_hat)
-                predictions = (probs > 0.5).float()
+            # Calculate detailed metrics
+            concept_metrics = self._calculate_concept_metrics(concepts_hat, all_targets, method_type="binary")
+            concept_metrics["pos_weight_used"] = pos_weight_value  # Add method-specific metric
 
-                # Calculate metrics
-                true_positives = (predictions * all_targets).sum()
-                predicted_positives = predictions.sum()
-                actual_positives = all_targets.sum()
-                total_elements = all_targets.numel()
-                correct_predictions = (predictions == all_targets).float().sum()
-
-                # Avoid division by zero
-                precision = (true_positives / predicted_positives).item() if predicted_positives > 0 else 0.0
-                recall = (true_positives / actual_positives).item() if actual_positives > 0 else 0.0
-                f1_score = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
-                accuracy = (correct_predictions / total_elements).item()
-
-                # Probability statistics
-                mean_prob_positive = probs[all_targets == 1].mean().item() if (all_targets == 1).any() else 0.0
-                mean_prob_negative = probs[all_targets == 0].mean().item() if (all_targets == 0).any() else 0.0
-
-                # Update loss dictionary with detailed metrics
-                loss_dict.update({
-                    "concept_loss": concept_loss.item(),
-                    "mean_concept_hat": concepts_hat.mean().item(),
-                    "mean_concept_target": all_targets.mean().item(),
-                    "sum_targets_per_batch": all_targets.sum().item(),
-                    "concept_precision": precision,
-                    "concept_recall": recall,
-                    "concept_f1": f1_score,
-                    "concept_accuracy": accuracy,
-                    "mean_prob_positive": mean_prob_positive,
-                    "mean_prob_negative": mean_prob_negative,
-                    "num_predicted_positive": predicted_positives.item(),
-                    "num_actual_positive": actual_positives.item(),
-                    "num_true_positive": true_positives.item(),
-                    "pos_weight_used": pos_weight_value
-                })
-            total_loss = total_loss + concept_loss * self.config.concept_weight
-        elif self.config.use_concept_learning and self.config.concept_method == "transformer":
-            # For transformer method, keep the existing MSE loss implementation
-            # TODO add NORM loss
-
-            target_concepts = torch.concatenate([batch[key] for key, value in sorted(self.config.concept_types.items())], dim=-1).float()
-            # Calculate Frobenius norm (equivalent to MSE loss over the matrices)
-            # ||A - H||^2_F
-            concept_loss = F.mse_loss(concepts_hat, target_concepts, reduction='mean')
+            loss_dict.update(concept_metrics)
             loss_dict["concept_loss"] = concept_loss.item()
             total_loss = total_loss + concept_loss * self.config.concept_weight
+
+        elif self.config.use_concept_learning and self.config.concept_method == "transformer":
+            # For transformer method, keep the existing MSE loss implementation
+            target_concepts = torch.concatenate([batch[key] for key, value in sorted(self.config.concept_types.items())], dim=-1).float()
+
+            # Calculate Frobenius norm (equivalent to MSE loss over the matrices)
+            concept_loss = F.mse_loss(concepts_hat, target_concepts, reduction='mean')
+
+            # Calculate detailed metrics
+            concept_metrics = self._calculate_concept_metrics(concepts_hat, target_concepts, method_type="mse")
+
+            # Add MSE-specific metrics
+            with torch.no_grad():
+                concept_metrics["concept_mse"] = F.mse_loss(concepts_hat, target_concepts, reduction='mean').item()
+                concept_metrics["concept_mae"] = F.l1_loss(concepts_hat, target_concepts, reduction='mean').item()
+
+            loss_dict.update(concept_metrics)
+            loss_dict["concept_loss"] = concept_loss.item()
+            total_loss = total_loss + concept_loss * self.config.concept_weight
+
         elif self.config.use_concept_learning:
-            # Add zero concept loss if concept learning is enabled but no concepts are provided
-            loss_dict["concept_loss"] = 0.0
-        
+            raise NotImplemented('Unknown concept learning method specified')
+
         # Add KL divergence loss if VAE is enabled
         if self.config.use_vae:
             # Calculate Dₖₗ(latent_pdf || standard_normal)
@@ -653,157 +520,6 @@ class ConceptACT(ACT):
         else:
             return actions, (mu, log_sigma_x2)
 
-class ConceptACTEncoderLayer(nn.Module):
-    """
-    Encoder layer that incorporates concept learning via a parallel pathway.
-    Uses the entire input sequence as query for concept attention.
-    """
-    def __init__(self, config):
-        super().__init__()
-        # Standard self-attention as in ACTEncoderLayer
-        self.self_attn = nn.MultiheadAttention(config.dim_model, config.n_heads * 2, dropout=config.dropout)
-
-        # Concept learning components
-
-        self.n_concepts = sum([value for key, value in config.concept_types.items()])
-
-        # Learnable concepts
-        self.concepts = nn.Parameter(torch.zeros(1, self.n_concepts, config.dim_model))
-        nn.init.trunc_normal_(self.concepts, std=1.0 / math.sqrt(config.dim_model))
-        self.number_of_concept_heads = config.n_heads * 2
-        # Cross-attention for concept pathway
-        self.concept_attn = nn.MultiheadAttention(
-            config.dim_model, self.number_of_concept_heads, dropout=config.dropout,
-        )
-
-        # Projection layer after concatenation
-        self.concept_proj = nn.Linear(config.dim_model * 2, config.dim_model)
-        if config.use_rbf_head_selection:
-            self.head_weight_predictor = nn.Sequential(
-                nn.Linear(config.dim_model, self.number_of_concept_heads * 4),
-                #RBFActivation(self.number_of_concept_heads * 4, n_centers=self.number_of_concept_heads * 2),
-                nn.SELU(),
-                nn.Linear(self.number_of_concept_heads * 4, self.number_of_concept_heads * 2),
-                nn.LayerNorm(self.number_of_concept_heads * 2),
-                RBFLayer(in_features_dim=self.number_of_concept_heads * 2, num_kernels=self.number_of_concept_heads, out_features_dim=self.number_of_concept_heads),
-                #RBFActivation(self.number_of_concept_heads * 2, n_centers=self.number_of_concept_heads),
-                #nn.Linear(self.number_of_concept_heads, self.number_of_concept_heads),
-            )
-        else:
-            self.head_weight_predictor = nn.Sequential(
-                nn.Linear(config.dim_model, self.number_of_concept_heads * 4),
-                nn.SELU(),
-                nn.Linear(self.number_of_concept_heads * 4, self.number_of_concept_heads * 2),
-                nn.SELU(),
-                nn.Linear(self.number_of_concept_heads * 2, self.number_of_concept_heads),
-                nn.Softmax(dim=-1)
-            )
-
-        # Standard feed-forward network as in ACTEncoderLayer
-        self.linear1 = nn.Linear(config.dim_model, config.dim_feedforward)
-        self.dropout = nn.Dropout(config.dropout)
-        self.linear2 = nn.Linear(config.dim_feedforward, config.dim_model)
-
-        # Layer normalization and dropout layers
-        self.norm1 = nn.LayerNorm(config.dim_model)
-        self.norm2 = nn.LayerNorm(config.dim_model)
-        self.dropout1 = nn.Dropout(config.dropout)
-        self.dropout2 = nn.Dropout(config.dropout)
-
-        # From original ACTEncoderLayer
-        self.activation = get_activation_fn(config.feedforward_activation)
-        self.pre_norm = config.pre_norm
-    def forward(self, x, pos_embed=None, key_padding_mask=None):
-        """
-        Forward pass with concept learning pathway.
-
-        Args:
-            x: Input tensor (seq_len, batch_size, dim_model)
-            pos_embed: Positional embeddings
-            key_padding_mask: Padding mask for attention
-
-        Returns:
-            x: Output tensor (seq_len, batch_size, dim_model)
-            concept_attn: Attention scores over concepts (optional, if n_concepts > 0)
-        """
-        skip = x
-        if self.pre_norm:
-            x = self.norm1(x)
-
-        # Self-attention pathway (same as original)
-        q = k = x if pos_embed is None else x + pos_embed
-        x_self_attn = self.self_attn(q, k, value=x, key_padding_mask=key_padding_mask)[0]
-
-        # If using concepts, add the concept pathway
-        # Get batch size from x
-        seq_len, batch_size, dim = x.shape
-
-        # Expand concepts to match batch size
-        concepts = self.concepts.expand(batch_size, -1, -1).transpose(0, 1)  # (n_concepts, batch_size, dim)
-
-        # Cross-attention between the entire input sequence and concepts
-        # Using the entire x as query
-        x_concept, concept_attn = self.concept_attn(
-            query=q,  # Use the same query as in self-attention (with pos_embed if provided)
-            key=concepts,
-            value=concepts,
-            average_attn_weights=False,
-        ) # return shape: `(N, \text{num\_heads}, L, S)
-
-        concept_attn = concept_attn.mean(-2) # Mean over Seq Lenght
-
-        def gumbel_top_k(logits, k, tau=1.0, hard=False):
-            """Gumbel softmax with top-k masking"""
-            # Get top-k indices
-            top_k_values, top_k_indices = torch.topk(logits, k, dim=-1)
-
-            # Create mask for top-k elements
-            mask = torch.zeros_like(logits)
-            mask.scatter_(-1, top_k_indices, 1.0)
-
-            # Mask out non-top-k elements
-            masked_logits = logits.masked_fill(mask == 0, float('-inf'))
-
-            # Apply gumbel_softmax only to top-k elements
-            return F.gumbel_softmax(masked_logits, tau=tau, hard=hard, dim=-1)
-        # Use mean pooling across sequence dimension to get per-batch representation
-        #input_repr = x.mean(0)  # (batch_size, dim_model)
-        # First token as
-        #input_repr = x[0, :, :].squeeze()
-        input_repr = x_concept
-        head_logits = self.head_weight_predictor(input_repr).mean(0)  # (batch_size, n_heads)
-        head_weights = gumbel_top_k(head_logits, k=3, tau=0.1, hard=False)
-
-        # Apply dynamic weights
-        head_weights = head_weights.unsqueeze(-1) # (batch_size, n_heads, 1,)
-        concept_attn = (concept_attn * head_weights).sum(1)
-
-        # Concatenate the self-attention output with concept output along feature dimension
-        x_combined = torch.cat([x_self_attn, x_concept], dim=-1)
-
-        # Project back to original dimension
-        x = self.activation(self.concept_proj(x_combined))
-
-
-        # Add residual connection and normalization
-        x = skip + self.dropout1(x)
-        if self.pre_norm:
-            skip = x
-            x = self.norm2(x)
-        else:
-            x = self.norm1(x)
-            skip = x
-
-        # Feed-forward network (same as original)
-        x = self.linear2(self.dropout(self.activation(self.linear1(x))))
-        x = skip + self.dropout2(x)
-        if not self.pre_norm:
-            x = self.norm2(x)
-
-        if self.n_concepts > 0:
-            return x, concept_attn
-        else:
-            return x
 
 from lerobot.common.policies.act.modeling_act import ACTEncoderLayer
 class ConceptACTEncoder(nn.Module):
@@ -844,12 +560,15 @@ class ConceptACTEncoder(nn.Module):
                 })
             elif config.concept_method == "transformer" or config.concept_method == "transformer_ce" or config.concept_method == "transformer_bce":
                 # Create a transformer-based concept learning module
-                if num_layers > 1:
-                    # Add concept layer as the final layer
-                    self.layers.append(ConceptACTEncoderLayer(config))
+                if config.use_class_aware_concepts:
+                    concept_layer = ClassAwareConceptACTEncoderLayer(config)
                 else:
-                    # If only one layer, make it a concept layer
-                    self.layers = nn.ModuleList([ConceptACTEncoderLayer(config)])
+                    concept_layer = ConceptACTEncoderLayer(config)
+
+                if num_layers > 1:
+                    self.layers.append(concept_layer)
+                else:
+                    self.layers = nn.ModuleList([concept_layer])
             else:
                 raise "Unknown concept method"
 

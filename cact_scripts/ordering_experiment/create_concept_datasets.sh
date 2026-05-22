@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Configuration variables
-SOURCE_PREFIX="so101_individual_cases_new_"
+SOURCE_PREFIX="so101_sorting_case_"
 TARGET_SUFFIX="with_concepts_"
 
 # Set library path to include conda environment libraries
@@ -20,7 +20,7 @@ echo "Creating concept-enhanced datasets..."
 
 
 # Run the add_features_from_metadata.py script with our config
-python lerobot/scripts/add_features_from_metadata.py \
+python cact_scripts/ordering_experiment/add_features_from_metadata.py \
     --prefix "$SOURCE_PREFIX" \
     --target-suffix "$TARGET_SUFFIX" 
     

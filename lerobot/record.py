@@ -223,6 +223,7 @@ def record_loop(
             dataset.add_frame(frame, task=single_task)
 
         if display_data:
+            print("Display")
             for obs, val in observation.items():
                 if isinstance(val, float):
                     rr.log(f"observation.{obs}", rr.Scalar(val))

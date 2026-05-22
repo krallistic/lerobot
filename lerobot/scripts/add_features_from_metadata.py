@@ -85,73 +85,73 @@ def create_feature_configurations() -> Dict[str, Dict[str, Any]]:
 
 
 def extract_features_from_metadata(
-    dataset: LeRobotDataset, 
-    feature_configs: Dict[str, Dict[str, Any]]
+        dataset: LeRobotDataset,
+        feature_configs: Dict[str, Dict[str, Any]]
 ) -> Dict[int, Dict[str, Any]]:
     """Extract additional features from dataset metadata.
-    
+
     Extract color, shape, pickup location, and dropoff information from task descriptions,
     and create one-hot encodings for each feature.
-    
+
     Args:
         dataset: LeRobotDataset object
         feature_configs: Dictionary of feature configurations
-        
+
     Returns:
         dict: Dictionary mapping from episode_index to a dict of new features
     """
     # Initialize dictionary for new features
     new_features = {}
-    
+
     # Get information from dataset metadata
     for episode_index in range(dataset.meta.total_episodes):
         # Get episode metadata
         episode_data = dataset.meta.episodes[episode_index]
-        
+
         # Initialize feature vectors with zeros
         feature_vectors = {
             feature_name: np.array([0] * len(config["values"]))
             for feature_name, config in feature_configs.items()
         }
-        
+
         # Extract task information
         tasks = episode_data.get("tasks", [])
-        
+
         if tasks:
-            # Parse the task description (Expected format: "Grasping Color: $color Shape: $shape Location: $location Dropoff: $dropoff")
+            # Parse the task description (Format: "Pickup $color $shape at $location and drop it in $dropoff")
             task_description = tasks[0]  # Assuming one task per episode
-            
-            # Extract color
-            if "Color:" in task_description:
-                color_part = task_description.split("Color:")[1].split("Shape:")[0].strip()
-                values = feature_configs["concept_color"]["values"]
-                if color_part in values:
-                    feature_vectors["concept_color"][values.index(color_part)] = 1
-            
-            # Extract shape
-            if "Shape:" in task_description:
-                shape_part = task_description.split("Shape:")[1].split("Location:")[0].strip()
-                values = feature_configs["concept_shape"]["values"]
-                if shape_part in values:
-                    feature_vectors["concept_shape"][values.index(shape_part)] = 1
-            
+
+            # Extract color and shape from the beginning part
+            pickup_part = task_description.split("Pickup ")[1].split(" at ")[0].strip()
+            words = pickup_part.split()
+
+            # Extract color (first word)
+            color_part = words[0]
+            values = feature_configs["concept_color"]["values"]
+            if color_part in values:
+                feature_vectors["concept_color"][values.index(color_part)] = 1
+
+            # Extract shape (second word)
+            shape_part = words[1]
+            values = feature_configs["concept_shape"]["values"]
+            if shape_part in values:
+                feature_vectors["concept_shape"][values.index(shape_part)] = 1
+
             # Extract location (pickup)
-            if "Location:" in task_description:
-                location_part = task_description.split("Location:")[1].split("Dropoff:")[0].strip()
-                values = feature_configs["concept_location"]["values"]
-                if location_part in values:
-                    feature_vectors["concept_location"][values.index(location_part)] = 1
-            
+            location_part = task_description.split(" at ")[1].split(" and drop it in ")[0].strip()
+            values = feature_configs["concept_location"]["values"]
+            if location_part in values:
+                feature_vectors["concept_location"][values.index(location_part)] = 1
+
             # Extract dropoff
-            if "Dropoff:" in task_description:
-                dropoff_part = task_description.split("Dropoff:")[1].strip()
-                values = feature_configs["concept_dropoff"]["values"]
-                if dropoff_part in values:
-                    feature_vectors["concept_dropoff"][values.index(dropoff_part)] = 1
-        
+            dropoff_part = task_description.split(" and drop it in ")[1].strip()
+            values = feature_configs["concept_dropoff"]["values"]
+            if dropoff_part in values:
+                feature_vectors["concept_dropoff"][values.index(dropoff_part)] = 1
+
         # Create a dictionary of new features for this episode
         new_features[episode_index] = feature_vectors
-    
+
     return new_features
 
 
@@ -225,10 +225,10 @@ def copy_and_enhance_episodes(
         from_to = list(range(source_dataset.episode_data_index['from'][episode_index], source_dataset.episode_data_index["to"][episode_index]))
         #from_idx = source_dataset.hf_dataset[episode_indices["from"]:episode_indices["to"]]
         #from_idx = source_dataset.hf_dataset.filter(lambda example: example['episode_index'] == episode_index)
-
         # Process each frame in the episode
         for i in from_to:
             frame = source_dataset[i]
+
             #c, h, w = frame['observation.images.wrist'].shape
             #print("Before:",frame['observation.images.wrist'].shape)
             #frame['observation.images.wrist'] = frame['observation.images.wrist'].reshape(h, w, c)
@@ -246,10 +246,12 @@ def copy_and_enhance_episodes(
             del frame['task_index']
             del frame['episode_index']
             del frame['timestamp']
+            task_e = frame['task']
+            del frame['task']
 
             #frame['timestamp'] = np.array(frame['timestamp'])
             # Add the enhanced frame to the new dataset
-            enhanced_dataset.add_frame(frame)
+            enhanced_dataset.add_frame(frame, task=task_e)
         
         # Save the episode
         enhanced_dataset.save_episode()
@@ -281,7 +283,7 @@ def find_datasets_by_prefix(prefix: str, root: Optional[Union[str, Path]] = None
     
     # Create the search pattern
     if username:
-        search_pattern = f"{username}/so100_{prefix}*"
+        search_pattern = f"{username}/{prefix}*"
     else:
         search_pattern = f"*/{prefix}*"
     
@@ -328,7 +330,10 @@ def main():
     # Find datasets matching the prefix
     logging.info(f"Searching for datasets with prefix: {args.prefix}")
     repo_ids = find_datasets_by_prefix(args.prefix, args.root)
-    
+
+
+    existing_target_repo_ids = find_datasets_by_prefix(args.prefix + args.target_suffix, args.root)
+
     if not repo_ids:
         logging.error(f"No datasets found matching prefix: {args.prefix}")
         return
@@ -345,6 +350,10 @@ def main():
         target_repo_id = source_repo_id.replace(args.prefix, f"{args.prefix}{args.target_suffix}")
         
         logging.info(f"Processing dataset: {source_repo_id} -> {target_repo_id}")
+
+        if target_repo_id in existing_target_repo_ids:
+            print("Already exists")
+            continue
         
         try:
             # Load the source dataset

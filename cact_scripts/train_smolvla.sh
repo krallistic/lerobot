@@ -4,16 +4,17 @@
 DATASET_PREFIX="so101_individual_cases_new_with_concepts"
 
 
-BASE_JOB_NAME="smolvla_base_dev"
+BASE_JOB_NAME="smolvla_20epochs"
 BASE_OUTPUT_DIR="outputs/train/${BASE_JOB_NAME}"
 DEVICE="cuda"  # Use "cuda" for GPU or "cpu" for CPU
 
 # Random seeds to loop over
 SEEDS=(42 123 456 100 101 102 103 104 105 106)
 PERCENTS=(0.2 0.4 0.6 0.8 1.0)
+PERCENTS=(1.0)
 
 
-CONCEPT_WEIGHT=0.1  # Weight for concept loss component
+
 ENABLE_WANDB=true  # Set to true to enable Weights & Biases logging
 
 # Set library path to include conda environment libraries
@@ -41,7 +42,7 @@ done
 
 echo "Dataset list: $DATASET_LIST"
 
-LEARNING_RATE=3e-5
+LEARNING_RATE=1e-5
 BATCH_SIZE=4
 STEPS=30000
 
@@ -71,7 +72,7 @@ for SEED in "${SEEDS[@]}"; do
         --job_name=$JOB_NAME \
         --policy.device=$DEVICE \
         --batch_size=$BATCH_SIZE \
-        --epochs=10 \
+        --epochs=20 \
         --dataset_percent=$PERCENT \
         --log_freq=10000 \
         --save_freq=0 \

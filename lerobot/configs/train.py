@@ -52,7 +52,11 @@ class TrainPipelineConfig(HubMixin):
     # Number of workers for the dataloader.
     num_workers: int = 4
     batch_size: int = 8
-    steps: int = 100_000
+    # Training duration: specify either steps OR epochs, not both
+    steps: int | None = None
+    epochs: int | None = None
+    # Percentage of the dataset to use for training (0-1)
+    dataset_percent: float = 1.0
     eval_freq: int = 20_000
     log_freq: int = 200
     save_checkpoint: bool = True
@@ -66,8 +70,26 @@ class TrainPipelineConfig(HubMixin):
 
     def __post_init__(self):
         self.checkpoint_path = None
+        self._original_epochs = self.epochs  # Store original epochs value for later use
 
     def validate(self):
+        # Validate epochs and steps
+        if self.epochs is not None and self.steps is not None:
+            raise ValueError(
+                "Cannot specify both 'epochs' and 'steps'. Please specify only one training duration parameter."
+            )
+
+        if self.epochs is None and self.steps is None:
+            raise ValueError(
+                "Must specify either 'epochs' or 'steps' for training duration."
+            )
+
+        # Validate dataset_percent
+        if not 0 < self.dataset_percent <= 1.0:
+            raise ValueError(
+                f"dataset_percent must be between 0 and 1, got {self.dataset_percent}"
+            )
+
         # HACK: We parse again the cli args here to get the pretrained paths if there was some.
         policy_path = parser.get_path_arg("policy")
         if policy_path:
@@ -109,7 +131,7 @@ class TrainPipelineConfig(HubMixin):
 
         if isinstance(self.dataset.repo_id, list):
             print("Warning Custom LeRobotMultiDataset")
-            #raise NotImplementedError("LeRobotMultiDataset is not currently implemented.")
+            # raise NotImplementedError("LeRobotMultiDataset is not currently implemented.")
 
         if not self.use_policy_training_preset and (self.optimizer is None or self.scheduler is None):
             raise ValueError("Optimizer and Scheduler must be set when the policy presets are not used.")
@@ -122,13 +144,25 @@ class TrainPipelineConfig(HubMixin):
                 "'policy.repo_id' argument missing. Please specify it to push the model to the hub."
             )
 
+    def calculate_steps_from_epochs(self, dataset_size: int) -> None:
+        """Calculate steps from epochs if epochs is specified."""
+        if self.epochs is not None:
+            self.steps = self.epochs * (dataset_size)
+            # If there's a remainder, add one more step to cover the last partial batch
+            if dataset_size % self.batch_size != 0:
+                self.steps += (dataset_size % self.batch_size)
+
     @classmethod
     def __get_path_fields__(cls) -> list[str]:
         """This enables the parser to load config from the policy using `--policy.path=local/dir`"""
         return ["policy"]
 
     def to_dict(self) -> dict:
-        return draccus.encode(self)
+        result = draccus.encode(self)
+        # Include the original epochs value if it was set
+        if hasattr(self, '_original_epochs') and self._original_epochs is not None:
+            result['_original_epochs'] = self._original_epochs
+        return result
 
     def _save_pretrained(self, save_directory: Path) -> None:
         with open(save_directory / TRAIN_CONFIG_NAME, "w") as f, draccus.config_type("json"):
@@ -136,17 +170,17 @@ class TrainPipelineConfig(HubMixin):
 
     @classmethod
     def from_pretrained(
-        cls: Type["TrainPipelineConfig"],
-        pretrained_name_or_path: str | Path,
-        *,
-        force_download: bool = False,
-        resume_download: bool = None,
-        proxies: dict | None = None,
-        token: str | bool | None = None,
-        cache_dir: str | Path | None = None,
-        local_files_only: bool = False,
-        revision: str | None = None,
-        **kwargs,
+            cls: Type["TrainPipelineConfig"],
+            pretrained_name_or_path: str | Path,
+            *,
+            force_download: bool = False,
+            resume_download: bool = None,
+            proxies: dict | None = None,
+            token: str | bool | None = None,
+            cache_dir: str | Path | None = None,
+            local_files_only: bool = False,
+            revision: str | None = None,
+            **kwargs,
     ) -> "TrainPipelineConfig":
         model_id = str(pretrained_name_or_path)
         config_file: str | None = None

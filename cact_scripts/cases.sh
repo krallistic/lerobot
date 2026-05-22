@@ -60,20 +60,25 @@ process_case() {
     dropoff=$(determine_dropoff "$color" "$shape" "$location")
     echo "Training: $color $shape at location $location → $dropoff"
     python lerobot/scripts/say.py "Training: Color $color.  Shape $shape. at location $location. Dropoff in $dropoff. Dropoff in $dropoff."
-    repo_id="individual_cases_simple_$color-$shape-$location-$dropoff"
-    python lerobot/scripts/control_robot.py \
-          --robot.type=so100 \
-          --control.type=record \
-          --control.single_task="Grasping Color: $color Shape: $shape Location: $location Dropoff: $dropoff" \
-          --control.fps=30 \
-          --control.repo_id=${HF_USER}/so100_${repo_id} \
-          --control.tags='["$color", "$shape", "$location", "$dropoff"]' \
-          --control.warmup_time_s=5 \
-          --control.episode_time_s=30 \
-          --control.reset_time_s=20 \
-          --control.num_episodes=3 \
-          --control.push_to_hub=false \
-          --control.resume=true
+    repo_id="individual_cases_new_$color-$shape-$location-$dropoff"
+    python -m lerobot.record \
+          --robot.type=so101_follower \
+          --robot.port=/dev/ttyACM0 \
+          --robot.id=so101_follower \
+          --robot.cameras="{ hand: {type: opencv, index_or_path: 2, width: 480, height: 640, fps: 30, rotation: -90}, scene: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}" \
+          --teleop.type=so101_leader \
+          --teleop.port=/dev/ttyACM1 \
+          --teleop.id=so101_leader \
+          --display_data=False \
+          --play_sounds=False \
+          --dataset.fps=30 \
+          --dataset.repo_id=${HF_USER}/so101_${repo_id} \
+          --dataset.push_to_hub=False \
+          --dataset.episode_time_s=30 \
+          --dataset.reset_time_s=20 \
+          --dataset.num_episodes=5 \
+          --dataset.tags='["$color", "$shape", "$location", "$dropoff"]' \
+          --dataset.single_task="Pickup $color $shape at $location and drop it in $dropoff"
     python lerobot/scripts/say.py "Done"
     return 0  # Count this case
   elif [ "$mode" = "test" ] && [ "$is_test" = "true" ]; then
@@ -91,6 +96,7 @@ process_case() {
 cube_colors=("red" "green" "yellow")
 rectangle_colors=("red" "blue" "green" "yellow")
 cylinder_colors=("red" "blue" "green")
+shapes=("cube" "rectangle" "cylinder")
 locations=(1 2 3 4 5)
 
 # Initialize counters
@@ -107,7 +113,7 @@ else
 fi
 
 # Process all valid combinations in a single loop
-for shape in "cube" "rectangle" "cylinder"; do
+for shape in "${shapes[@]}"; do
   # Select appropriate colors based on shape
   if [ "$shape" = "cube" ]; then
     colors=("${cube_colors[@]}")

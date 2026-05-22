@@ -23,7 +23,7 @@ from contextlib import nullcontext
 from copy import copy
 from functools import cache
 
-import cv2
+#import cv2
 import numpy as np
 import torch
 from deepdiff import DeepDiff
@@ -36,6 +36,10 @@ from lerobot.common.robots import Robot
 from lerobot.common.utils.utils import get_safe_torch_device, has_method
 from lerobot.common.datasets.image_writer import safe_stop_image_writer
 
+from lerobot.common.utils.robot_utils import busy_wait
+
+from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.common.datasets.utils import build_dataset_frame, hw_to_dataset_features
 
 def log_control_info(robot: Robot, dt_s, episode_index=None, frame_index=None, fps=None):
     log_items = []
@@ -115,9 +119,9 @@ def predict_action(
     ):
         # Convert to pytorch format: channel first and float32 in [0,1] with batch dimension
         for name in observation:
-            observation[name] = torch.from_numpy(observation[name])
-            if "image" in name:
-                observation[name] = observation[name].type(torch.float32) / 255
+            observation[name] = torch.tensor(observation[name])
+            if "images" in name:
+                observation[name] = observation[name].type(torch.float32) / 255.0
                 observation[name] = observation[name].permute(2, 0, 1).contiguous()
             observation[name] = observation[name].unsqueeze(0)
             observation[name] = observation[name].to(device)
@@ -179,54 +183,17 @@ def init_keyboard_listener():
     return listener, events
 
 
-def warmup_record(
-    robot,
-    events,
-    enable_teleoperation,
-    warmup_time_s,
-    display_cameras,
-    fps,
-):
-    control_loop(
-        robot=robot,
-        control_time_s=warmup_time_s,
-        display_cameras=display_cameras,
-        events=events,
-        fps=fps,
-        teleoperate=enable_teleoperation,
-    )
 
-
-def record_episode(
-    robot,
-    dataset,
-    events,
-    episode_time_s,
-    display_cameras,
-    policy,
-    fps,
-    single_task,
-):
-    control_loop(
-        robot=robot,
-        control_time_s=episode_time_s,
-        display_cameras=display_cameras,
-        dataset=dataset,
-        events=events,
-        policy=policy,
-        fps=fps,
-        teleoperate=policy is None,
-        single_task=single_task,
-    )
 
 
 @safe_stop_image_writer
 def control_loop(
     robot,
+    teleop,
     control_time_s=None,
-    teleoperate=False,
     display_cameras=False,
     dataset: LeRobotDataset | None = None,
+    dataset_features: dict | None = None,
     events=None,
     policy: PreTrainedPolicy = None,
     fps: int | None = None,
@@ -242,7 +209,7 @@ def control_loop(
     if control_time_s is None:
         control_time_s = float("inf")
 
-    if teleoperate and policy is not None:
+    if teleop and policy is not None:
         raise ValueError("When `teleoperate` is True, `policy` should be None.")
 
     if dataset is not None and single_task is None:
@@ -256,29 +223,30 @@ def control_loop(
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
 
-        if teleoperate:
-            observation, action = robot.teleop_step(record_data=True)
-        else:
-            observation = robot.capture_observation()
+        if teleop is not None:
+            action = teleop.get_action()
+            robot.send_action(action)
+            action = {"action": action}
 
-            if policy is not None:
-                pred_action = predict_action(
-                    observation, policy, get_safe_torch_device(policy.config.device), policy.config.use_amp
-                )
-                # Action can eventually be clipped using `max_relative_target`,
-                # so action actually sent is saved in the dataset.
-                action = robot.send_action(pred_action)
-                action = {"action": action}
+        else:
+            observation = robot.get_observation()
+
+            observation_frame = build_dataset_frame(dataset_features, observation, prefix="observation")
+
+            action_values = predict_action(
+                observation_frame,
+                policy,
+                get_safe_torch_device(policy.config.device),
+                policy.config.use_amp,
+                task=single_task,
+                robot_type=robot.robot_type,
+            )
+            action = {key: action_values[i].item() for i, key in enumerate(robot.action_features)}
+            sent_action = robot.send_action(action)
 
         if dataset is not None:
             frame = {**observation, **action, "task": single_task}
             dataset.add_frame(frame)
-
-        if display_cameras and not is_headless():
-            image_keys = [key for key in observation if "image" in key]
-            for key in image_keys:
-                cv2.imshow(key, cv2.cvtColor(observation[key].numpy(), cv2.COLOR_RGB2BGR))
-            cv2.waitKey(1)
 
         if fps is not None:
             dt_s = time.perf_counter() - start_loop_t
@@ -291,31 +259,6 @@ def control_loop(
         if events["exit_early"]:
             events["exit_early"] = False
             break
-
-
-def reset_environment(robot, events, reset_time_s, fps):
-    # TODO(rcadene): refactor warmup_record and reset_environment
-    if has_method(robot, "teleop_safety_stop"):
-        robot.teleop_safety_stop()
-
-    control_loop(
-        robot=robot,
-        control_time_s=reset_time_s,
-        events=events,
-        fps=fps,
-        teleoperate=True,
-    )
-
-
-def stop_recording(robot, listener, display_cameras):
-    robot.disconnect()
-
-    if not is_headless():
-        if listener is not None:
-            listener.stop()
-
-        if display_cameras:
-            cv2.destroyAllWindows()
 
 
 def sanity_check_dataset_name(repo_id, policy_cfg):

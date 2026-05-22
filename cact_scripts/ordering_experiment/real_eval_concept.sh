@@ -7,34 +7,37 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 sudo chmod a+rw /dev/ttyACM1
 sudo chmod a+rw /dev/ttyACM0
 
-# Configuration variables
+# Configuration variables for ORDERING TASK
 CHECKPOINTS=false  # Set to true to evaluate all checkpoints, false for latest checkpoint only
-BASE_JOB_NAME="smolvla_20epochs"
+GENERIC_TASK=true  # Set to true to add "_generic_task" suffix and pass --generic_task=True flag
+BASE_JOB_NAME="ordering_lavact_so101_10epoch"
 
-#BASE_JOB_NAME="act_normal_so100_more_heads"
+#BASE_JOB_NAME="act_normal_ordering_so100_more_heads"
 BASE_OUTPUT_DIR="outputs/train"
 DEVICE="cuda"
 ROBOT_TYPE="so101"
-N_EPISODES=10
+N_EPISODES=6  # Updated to match number of test cases
 
 echo "=================================="
-echo "Robot Evaluation Script"
+echo "Ordering Task Robot Evaluation Script"
 echo "=================================="
 echo "Base model pattern: $BASE_JOB_NAME"
 echo "Checkpoint evaluation mode: $CHECKPOINTS"
+echo "Generic task mode: $GENERIC_TASK"
+echo "Task: Sequential object ordering"
 echo "=================================="
 
-DATASET_PREFIX="so101_individual_cases_new_with_concepts"
+DATASET_PREFIX="so101_sorting_case_with_concepts"
 
 # Get Hugging Face username
 HF_USER=$(huggingface-cli whoami | head -n 1)
 echo "Logged in as: $HF_USER"
 
-echo "Collecting concept datasets"
+echo "Collecting ordering task concept datasets"
 # List directories matching our prefix and remove trailing slashes
 DATASETS_NAME=$(ls -l ~/.cache/huggingface/lerobot/${HF_USER}/ | grep $DATASET_PREFIX | awk '{print $NF}' | sed 's/\/$//' | head -n 3)
 
-echo "Building dataset list"
+echo "Building dataset list for ordering task"
 # Build a comma-separated list of datasets with the user prefix
 DATASET_LIST=""
 for dataset in $DATASETS_NAME; do
@@ -48,7 +51,12 @@ done
 echo $DATASET_LIST
 
 # Create base evaluation output directory (organized by base job name only)
-EVAL_BASE_DIR="outputs/eval/${BASE_JOB_NAME}"
+EVAL_BASE_DIR="outputs/eval/ordering/${BASE_JOB_NAME}"  # Updated path for ordering task
+
+# Add "_generic_task" suffix if GENERIC_TASK is true
+if [ "$GENERIC_TASK" = true ]; then
+    EVAL_BASE_DIR="${EVAL_BASE_DIR}_generic_task"
+fi
 
 echo "Using evaluation output directory: $EVAL_BASE_DIR"
 mkdir -p "$EVAL_BASE_DIR"
@@ -68,7 +76,7 @@ echo ""
 
 # Count available models
 MODEL_COUNT=$(echo "$TRAIN_DIRS" | wc -l)
-echo "Found $MODEL_COUNT base model(s) to evaluate."
+echo "Found $MODEL_COUNT ordering task model(s) to evaluate."
 echo ""
 
 # Function to extract model suffix (everything after BASE_JOB_NAME)
@@ -85,8 +93,8 @@ run_single_evaluation() {
     local job_suffix="$2"
     local checkpoint_name="$3"
 
-    # Construct output filename
-    local output_filename="eval_result"
+    # Construct output filename for ordering task
+    local output_filename="eval_result_ordering"
     if [ -n "$job_suffix" ]; then
         output_filename="${output_filename}_${job_suffix}"
     fi
@@ -105,16 +113,17 @@ run_single_evaluation() {
     fi
 
     echo "----------------------------------------"
-    echo "🚀 Running NEW evaluation:"
+    echo "🚀 Running NEW ordering task evaluation:"
     echo "  Model: $model_path"
     echo "  Job suffix: '$job_suffix'"
     echo "  Checkpoint: $checkpoint_name"
     echo "  Output file: $output_filename"
     echo "  Full path: $output_file_path"
+    echo "  Task: Sequential object ordering (3 objects)"
     echo "----------------------------------------"
 
     # Construct job name for display purposes
-    local job_name="eval_${BASE_JOB_NAME}"
+    local job_name="eval_ordering_${BASE_JOB_NAME}"
     if [ -n "$job_suffix" ]; then
         job_name="${job_name}_${job_suffix}"
     fi
@@ -124,27 +133,35 @@ run_single_evaluation() {
 
     echo "Job name: $job_name"
 
-    # Run the evaluation
-    python cact_scripts/eval.py \
+    # Build the Python command
+    local python_cmd="python cact_scripts/ordering_experiment/eval.py \
         --robot.type=so101_follower \
         --robot.port=/dev/ttyACM0 \
         --robot.id=so101_follower \
-        --robot.cameras="{ hand: {type: opencv, index_or_path: 2, width: 480, height: 640, fps: 30, rotation: -90}, scene: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}" \
+        --robot.cameras=\"{ hand: {type: opencv, index_or_path: 2, width: 480, height: 640, fps: 30, rotation: -90}, scene: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}\" \
         --teleop.type=so101_leader \
         --teleop.port=/dev/ttyACM1 \
         --teleop.id=so101_leader \
-        --policy.path="$model_path" \
-        --policy.device="$DEVICE" \
-        --job_name="$job_name" \
+        --policy.path=\"$model_path\" \
+        --policy.device=\"$DEVICE\" \
+        --job_name=\"$job_name\" \
         --dataset.repo_id=$DATASET_LIST \
-        --output_dir="$EVAL_BASE_DIR" \
-        --output_filename="$output_filename"
+        --output_dir=\"$EVAL_BASE_DIR\" \
+        --output_filename=\"$output_filename\""
+
+    # Add generic_task flag if enabled
+    if [ "$GENERIC_TASK" = true ]; then
+        python_cmd="$python_cmd --generic_task=True"
+    fi
+
+    # Run the evaluation for ordering task
+    eval $python_cmd
 
     # Check if evaluation was successful
     if [ -f "$output_file_path" ]; then
-        echo "✅ Evaluation completed successfully: $output_filename"
+        echo "✅ Ordering task evaluation completed successfully: $output_filename"
     else
-        echo "❌ Evaluation failed: $output_filename was not created"
+        echo "❌ Ordering task evaluation failed: $output_filename was not created"
     fi
     echo ""
 }
@@ -155,7 +172,7 @@ SKIPPED_EVALUATIONS=0
 COMPLETED_EVALUATIONS=0
 
 for SELECTED_DIR in $TRAIN_DIRS; do
-    echo "📁 Processing model: $(basename "$SELECTED_DIR")"
+    echo "📁 Processing ordering task model: $(basename "$SELECTED_DIR")"
 
     # Extract model suffix for job naming
     MODEL_SUFFIX=$(get_model_suffix "$SELECTED_DIR")
@@ -180,7 +197,7 @@ for SELECTED_DIR in $TRAIN_DIRS; do
 
     if [ "$CHECKPOINTS" = true ]; then
         # Evaluate all checkpoints
-        echo "📊 Checkpoint mode: Evaluating all checkpoints"
+        echo "📊 Checkpoint mode: Evaluating all checkpoints for ordering task"
         CHECKPOINT_COUNT=$(echo "$CHECKPOINTS_FOUND" | wc -l)
         echo "Found $CHECKPOINT_COUNT checkpoint(s) to evaluate:"
         echo "$CHECKPOINTS_FOUND" | sed 's/.*\///g' | sed 's/^/  - /'
@@ -199,7 +216,7 @@ for SELECTED_DIR in $TRAIN_DIRS; do
             TOTAL_EVALUATIONS=$((TOTAL_EVALUATIONS + 1))
 
             # Check if this evaluation would be skipped before calling the function
-            output_filename="eval_result"
+            output_filename="eval_result_ordering"
             if [ -n "$MODEL_SUFFIX" ]; then
                 output_filename="${output_filename}_${MODEL_SUFFIX}"
             fi
@@ -216,7 +233,7 @@ for SELECTED_DIR in $TRAIN_DIRS; do
 
     else
         # Evaluate only the latest checkpoint (old behavior)
-        echo "📊 Latest checkpoint mode: Evaluating most recent checkpoint only"
+        echo "📊 Latest checkpoint mode: Evaluating most recent checkpoint for ordering task"
         LATEST_CHECKPOINT=$(echo "$CHECKPOINTS_FOUND" | tail -n 1)
         CHECKPOINT_NAME=$(basename "$LATEST_CHECKPOINT")
         MODEL_PATH="$LATEST_CHECKPOINT/pretrained_model"
@@ -232,7 +249,7 @@ for SELECTED_DIR in $TRAIN_DIRS; do
         TOTAL_EVALUATIONS=$((TOTAL_EVALUATIONS + 1))
 
         # Check if this evaluation would be skipped
-        output_filename="eval_result"
+        output_filename="eval_result_ordering"
         if [ -n "$MODEL_SUFFIX" ]; then
             output_filename="${output_filename}_${MODEL_SUFFIX}"
         fi
@@ -247,23 +264,25 @@ for SELECTED_DIR in $TRAIN_DIRS; do
         run_single_evaluation "$MODEL_PATH" "$MODEL_SUFFIX" "$CHECKPOINT_NAME"
     fi
 
-    echo "✅ Completed processing model: $(basename "$SELECTED_DIR")"
+    echo "✅ Completed processing ordering task model: $(basename "$SELECTED_DIR")"
     echo ""
 done
 
-echo "🎉 All evaluations completed!"
+echo "🎉 All ordering task evaluations completed!"
 echo ""
-echo "📊 SUMMARY:"
+echo "📊 ORDERING TASK SUMMARY:"
 echo "=================================="
 echo "📁 Results directory: $EVAL_BASE_DIR"
 echo "📈 Total potential evaluations: $TOTAL_EVALUATIONS"
 echo "⏭️  Skipped (already exist): $SKIPPED_EVALUATIONS"
 echo "🚀 Newly completed: $COMPLETED_EVALUATIONS"
 echo "📄 Total files in directory: $(find "$EVAL_BASE_DIR" -name "*.json" | wc -l)"
+echo "🎯 Task: Sequential ordering of 3 objects"
+echo "📊 Scoring: 0-6 scale (6 = perfect ordering)"
 echo "=================================="
 echo ""
 echo "📝 To extract results into a CSV:"
-echo "   python extract_eval_results.py --base-job $BASE_JOB_NAME"
+echo "   python extract_eval_results.py --base-job $BASE_JOB_NAME --task ordering"
 echo ""
 echo "📊 To plot results:"
-echo "   python plot_eval_results.py --input evaluation_results.csv"
+echo "   python plot_eval_results.py --input evaluation_results_ordering.csv --task ordering"

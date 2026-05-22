@@ -27,7 +27,7 @@ from torch.optim import Optimizer
 from lerobot.common.datasets.factory import make_dataset
 from lerobot.common.datasets.sampler import EpisodeAwareSampler
 from lerobot.common.datasets.utils import cycle
-from lerobot.common.envs.factory import make_env
+#from lerobot.common.envs.factory import make_env
 from lerobot.common.optim.factory import make_optimizer_and_scheduler
 from lerobot.common.policies.factory import make_policy
 from lerobot.common.policies.pretrained import PreTrainedPolicy
@@ -56,15 +56,16 @@ from lerobot.common.policies.act.modeling_concept_act import ConceptACTPolicy
 
 
 def update_policy(
-    train_metrics: MetricsTracker,
-    policy: PreTrainedPolicy,
-    batch: Any,
-    optimizer: Optimizer,
-    grad_clip_norm: float,
-    grad_scaler: GradScaler,
-    lr_scheduler=None,
-    use_amp: bool = False,
-    lock=None,
+        train_metrics: MetricsTracker,
+        policy: PreTrainedPolicy,
+        batch: Any,
+        optimizer: Optimizer,
+        grad_clip_norm: float,
+        grad_scaler: GradScaler,
+        cfg: TrainPipelineConfig,
+        lr_scheduler=None,
+        use_amp: bool = False,
+        lock=None,
 ) -> tuple[MetricsTracker, dict]:
     start_time = time.perf_counter()
     device = get_device_from_parameters(policy)
@@ -102,7 +103,12 @@ def update_policy(
 
     train_metrics.total_loss = loss.item()
     for key in output_dict:
-        train_metrics.metrics[key].update(output_dict[key])
+        if batch['timestamp'].shape[0] != cfg.batch_size:
+            continue
+        if isinstance(output_dict[key], torch.Tensor):
+            train_metrics.metrics[key].update(float(output_dict[key].detach().cpu().sum().numpy()))
+        else:
+            train_metrics.metrics[key].update(output_dict[key])
     if type(policy) == ConceptACTPolicy:
         train_metrics.normal_loss = output_dict['l1_loss'] + output_dict['kld_loss']
     train_metrics.grad_norm = grad_norm.item()
@@ -111,26 +117,42 @@ def update_policy(
     return train_metrics, output_dict
 
 
-def validataion_loss_eval(policy: PreTrainedPolicy, dataloader: torch.utils.data.DataLoader):
+def validataion_loss_eval(policy: PreTrainedPolicy, dataloader: torch.utils.data.DataLoader, cfg: TrainPipelineConfig):
+    #return  0.0
     loss_cumsum = 0
     n_examples_evaluated = 0
     for batch in dataloader:
+        if batch["index"].shape[0] < cfg.batch_size:
+            print("Not a full batch", batch["index"].shape)
+            continue
         for key in batch:
             if isinstance(batch[key], torch.Tensor):
-                batch[key] = batch[key].to(policy.config.device, non_blocking=True)
-        with torch.autocast(device_type=policy.config.device) if False else nullcontext():
+                batch[key] = batch[key].to(policy.config.device, non_blocking=False)
+        with torch.autocast(device_type=policy.config.device) if True else nullcontext():
             loss, output_dict = policy.forward(batch)
-            eval_loss = output_dict['l1_loss'] + output_dict['kld_loss']
+            if type(policy) == ConceptACTPolicy:
+                eval_loss = output_dict['l1_loss'] + output_dict['kld_loss']
+            else:
+                eval_loss = loss
+
+        for key in batch:
+            if isinstance(batch[key], torch.Tensor):
+                batch[key] = batch[key].to("cpu", non_blocking=False
+                                           )
 
         loss_cumsum += eval_loss
         n_examples_evaluated += batch["index"].shape[0]
+        if n_examples_evaluated > cfg.batch_size * 2:
+            break
 
     # Calculate the average loss over the validation set.
     average_loss = loss_cumsum / n_examples_evaluated
 
     return average_loss
 
+
 from torch.utils.data import random_split, DataLoader, Subset
+
 
 def split_dataset_random(dataset, cfg: TrainPipelineConfig, train_ratio=0.8):
     """
@@ -156,7 +178,7 @@ def split_dataset_random(dataset, cfg: TrainPipelineConfig, train_ratio=0.8):
     train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
 
     train_dataloader = torch.utils.data.DataLoader(
-        dataset,
+        train_dataset,
         num_workers=cfg.num_workers,
         batch_size=cfg.batch_size,
         shuffle=True,
@@ -166,12 +188,11 @@ def split_dataset_random(dataset, cfg: TrainPipelineConfig, train_ratio=0.8):
     )
 
     test_dataloader = torch.utils.data.DataLoader(
-        dataset,
+        test_dataset,
         num_workers=cfg.num_workers,
         batch_size=cfg.batch_size,
         shuffle=True,
         sampler=None,
-        #pin_memory=cfg.policy.device != "cpu",
         pin_memory=True,
         pin_memory_device='cuda',
         drop_last=False,
@@ -203,25 +224,34 @@ def create_metrics_tracker(loss_dict: dict, cfg, dataset, step: int = 0) -> Metr
         "eval_loss": AverageMeter("eval_loss", ":.3f")
     }
 
-
-
     # Add metrics from loss dictionary
     for key, value in loss_dict.items():
         if key not in base_metrics:  # Don't override base metrics
             base_metrics[key] = AverageMeter(key, ":.3f")
     if "concept_loss" in loss_dict:
         base_metrics['normal_loss'] = AverageMeter("normal_loss", ":.3f")
+
+    # Determine num_frames and num_episodes
+    num_frames = len(dataset) * cfg.batch_size
+    num_episodes = dataset.num_episodes if hasattr(dataset, 'num_episodes') else 1
+
     return MetricsTracker(
         cfg.batch_size,
-        dataset.num_frames,
-        dataset.num_episodes,
+        num_frames,
+        num_episodes,
         base_metrics,
         initial_step=step
     )
 
+
 @parser.wrap()
 def train(cfg: TrainPipelineConfig):
     cfg.validate()
+
+    # Store if we're using epochs mode before converting to steps
+    using_epochs = cfg.epochs is not None
+    original_epochs = cfg.epochs if using_epochs else None
+
     logging.info(pformat(cfg.to_dict()))
 
     if cfg.wandb.enable and cfg.wandb.project:
@@ -271,9 +301,17 @@ def train(cfg: TrainPipelineConfig):
     logging.info(colored("Output dir:", "yellow", attrs=["bold"]) + f" {cfg.output_dir}")
     if cfg.env is not None:
         logging.info(f"{cfg.env.task=}")
-    logging.info(f"{cfg.steps=} ({format_big_number(cfg.steps)})")
-    logging.info(f"{dataset.num_frames=} ({format_big_number(dataset.num_frames)})")
-    logging.info(f"{dataset.num_episodes=}")
+
+
+
+    # Episode filtering info is now logged inside make_dataset factory
+
+    # Get actual dataset attributes after subsetting
+    dataset_num_frames = dataset.num_frames if hasattr(dataset, 'num_frames') else len(dataset)
+    dataset_num_episodes = dataset.num_episodes if hasattr(dataset, 'num_episodes') else 1
+
+    logging.info(f"dataset.num_frames={dataset_num_frames} ({format_big_number(dataset_num_frames)})")
+    logging.info(f"dataset.num_episodes={dataset_num_episodes}")
     logging.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
     logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
 
@@ -297,6 +335,20 @@ def train(cfg: TrainPipelineConfig):
     train_tracker = None
 
 
+    # Calculate steps from epochs if needed
+    if using_epochs:
+        cfg.calculate_steps_from_epochs(len(train_dataloader))
+        logging.info(
+            f"Calculated {cfg.steps} steps from {original_epochs} epochs with dataset size {len(train_dataloader)} and batch size {cfg.batch_size}")
+        logging.info(f"epochs={original_epochs}")
+        logging.info(f"steps={cfg.steps} (calculated from epochs)")
+    else:
+        logging.info(f"steps={cfg.steps} ({format_big_number(cfg.steps)})")
+
+    # Track current epoch if using epochs mode
+    current_epoch = 0
+    steps_per_epoch = len(train_dataloader) if using_epochs else None
+    assert cfg.steps // steps_per_epoch == cfg.epochs
     logging.info("Start offline training on a fixed dataset")
     for _ in range(step, cfg.steps):
         start_time = time.perf_counter()
@@ -314,7 +366,7 @@ def train(cfg: TrainPipelineConfig):
                 _, sample_output_dict = policy.forward(batch)
 
             # Create metrics tracker based on the loss dictionary
-            train_tracker = create_metrics_tracker(sample_output_dict, cfg, dataset, step)
+            train_tracker = create_metrics_tracker(sample_output_dict, cfg, train_dataloader, step)
             logging.info(f"Created metrics tracker with fields: {list(train_tracker.metrics.keys())}")
 
         # Set dataloading time
@@ -327,6 +379,7 @@ def train(cfg: TrainPipelineConfig):
             optimizer,
             cfg.optimizer.grad_clip_norm,
             grad_scaler=grad_scaler,
+            cfg=cfg,
             lr_scheduler=lr_scheduler,
             use_amp=cfg.policy.use_amp,
         )
@@ -335,19 +388,32 @@ def train(cfg: TrainPipelineConfig):
         # increment `step` here.
         step += 1
         train_tracker.step()
-        is_log_step = cfg.log_freq > 0 and step % cfg.log_freq == 0
-        is_saving_step = step % cfg.save_freq == 0 or step == cfg.steps
+        if using_epochs:
+            is_log_step = (cfg.log_freq > 0 and step % cfg.log_freq == 0) or (step % steps_per_epoch == 0)
+        else:
+            is_log_step = cfg.log_freq > 0 and step % cfg.log_freq == 0
+        is_saving_step = (cfg.save_freq > 0 and step % cfg.save_freq == 0) or step == cfg.steps
         is_eval_step = cfg.eval_freq > 0 and step % cfg.eval_freq == 0
 
         if is_log_step:
             logging.info("calc validation eval loss on dataset")
-            eval_loss = validataion_loss_eval(policy, test_dataloader)
+            eval_loss = validataion_loss_eval(policy, test_dataloader, cfg)
             train_tracker.eval_loss = eval_loss
+
+            # Add epoch info to logging if using epochs
+            if using_epochs:
+                current_epoch = step // steps_per_epoch
+                epoch_progress = (step % steps_per_epoch) / steps_per_epoch * 100
+                logging.info(
+                    f"Epoch {current_epoch + 1}/{original_epochs} ({epoch_progress:.1f}%) - ")
             logging.info(train_tracker)
+
             if wandb_logger:
                 wandb_log_dict = train_tracker.to_dict()
                 if output_dict:
                     wandb_log_dict.update(output_dict)
+                if using_epochs:
+                    wandb_log_dict['epoch'] = current_epoch + (step % steps_per_epoch) / steps_per_epoch
                 wandb_logger.log_dict(wandb_log_dict, step)
             train_tracker.reset_averages()
 
@@ -359,7 +425,6 @@ def train(cfg: TrainPipelineConfig):
             if wandb_logger:
                 wandb_logger.log_policy(checkpoint_dir)
             logging.info(f"End of Checkpoint policy after step {step}")
-
 
         if cfg.env and is_eval_step:
             step_id = get_step_identifier(step, cfg.steps)
@@ -383,7 +448,7 @@ def train(cfg: TrainPipelineConfig):
                 "eval_s": AverageMeter("eval_s", ":.3f"),
             }
             eval_tracker = MetricsTracker(
-                cfg.batch_size, dataset.num_frames, dataset.num_episodes, eval_metrics, initial_step=step
+                cfg.batch_size, dataset_num_frames, dataset_num_episodes, eval_metrics, initial_step=step
             )
             eval_tracker.eval_s = eval_info["aggregated"].pop("eval_s")
             eval_tracker.avg_sum_reward = eval_info["aggregated"].pop("avg_sum_reward")
@@ -396,7 +461,11 @@ def train(cfg: TrainPipelineConfig):
 
     if eval_env:
         eval_env.close()
-    logging.info("End of training")
+
+    if using_epochs:
+        logging.info(f"End of training after {original_epochs} epochs")
+    else:
+        logging.info("End of training")
 
     if cfg.policy.push_to_hub:
         policy.push_model_to_hub(cfg)

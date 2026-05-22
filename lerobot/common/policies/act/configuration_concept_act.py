@@ -109,6 +109,8 @@ class ConceptACTConfig(ACTConfig):
     # Concept learning.
     use_concept_learning: bool = False
     concept_method: str = "prediction_head"  # Options: "prediction_head", "transformer"
+    use_class_aware_concepts: bool = False
+
     concept_dim: int = 128
     concept_weight: float = 1.0
     concept_types: dict = field(

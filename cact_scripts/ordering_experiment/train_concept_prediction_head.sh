@@ -1,16 +1,16 @@
 #!/bin/bash
 
 # Configuration variables
-DATASET_PREFIX="so101_individual_cases_new_with_concepts"
+DATASET_PREFIX="so101_sorting_case_with_concepts"
 
 
-BASE_JOB_NAME="predictionhead_act_so101_10epoch"
+BASE_JOB_NAME="ordering_predictionhead_act_so101_10epoch"
 BASE_OUTPUT_DIR="outputs/train/${BASE_JOB_NAME}"
 DEVICE="cuda"  # Use "cuda" for GPU or "cpu" for CPU
 
 # Random seeds to loop over
 SEEDS=(42 123 456 100 101 102 103 104 105 106)
-PERCENTS=(0.2 0.4 0.6 0.8 1.0)
+PERCENTS=(0.33 0.66)
 
 CONCEPT_WEIGHT=0.2  # Weight for concept loss component
 ENABLE_WANDB=true  # Set to true to enable Weights & Biases logging
@@ -77,6 +77,7 @@ for SEED in "${SEEDS[@]}"; do
         --log_freq=10000 \
         --save_freq=0 \
         --seed=$SEED \
+        --policy.concept_types='{"object_0_shape": 3, "object_0_color": 4, "object_1_shape": 3, "object_1_color": 4, "object_2_shape": 3, "object_2_color": 4, "concept_ordering": 3}' \
         $WANDB_FLAG
 
       echo "Completed training with seed $SEED and $PERCENT"

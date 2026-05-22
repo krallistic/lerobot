@@ -442,13 +442,14 @@ class OpenCVCamera(Camera):
 
         if self.thread is None or not self.thread.is_alive():
             self._start_read_thread()
+            self.new_frame_event.wait(timeout=timeout_ms / 1000.0)
 
-        if not self.new_frame_event.wait(timeout=timeout_ms / 1000.0):
-            thread_alive = self.thread is not None and self.thread.is_alive()
-            raise TimeoutError(
-                f"Timed out waiting for frame from camera {self} after {timeout_ms} ms. "
-                f"Read thread alive: {thread_alive}."
-            )
+        #if not self.new_frame_event.wait(timeout=timeout_ms / 1000.0):
+        #    thread_alive = self.thread is not None and self.thread.is_alive()
+            #raise TimeoutError(
+            #    f"Timed out waiting for frame from camera {self} after {timeout_ms} ms. "
+            #    f"Read thread alive: {thread_alive}."
+            #)
 
         with self.frame_lock:
             frame = self.latest_frame

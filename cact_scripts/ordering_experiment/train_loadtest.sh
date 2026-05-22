@@ -4,14 +4,14 @@
 DATASET_PREFIX="so101_sorting_case_"
 
 
-BASE_JOB_NAME="ordering_lavact_so101_10epoch"
+BASE_JOB_NAME="ordering_loadtest"
 BASE_OUTPUT_DIR="outputs/train/${BASE_JOB_NAME}"
 DEVICE="cuda"  # Use "cuda" for GPU or "cpu" for CPU
 
 # Random seeds to loop over
 SEEDS=(42 123 456 100 101 102 103 104 105 106)
 
-PERCENTS=(0.33 0.66 1.0)
+PERCENTS=(1.0)
 
 
 ENABLE_WANDB=true  # Set to true to enable Weights & Biases logging
@@ -69,7 +69,7 @@ for SEED in "${SEEDS[@]}"; do
       --policy.device=cuda \
       --policy.optimizer_lr=$LEARNING_RATE \
       --batch_size=$BATCH_SIZE \
-      --epochs=10 \
+      --epochs=100 \
       --dataset_percent=$PERCENT \
       --policy.n_heads=16 \
       --log_freq=10000 \

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Configuration variables
-SOURCE_PREFIX="individual_cases_simple_"
+SOURCE_PREFIX="so101_individual_cases_new_"
 TARGET_SUFFIX="with_concepts_"
 
 # Set library path to include conda environment libraries

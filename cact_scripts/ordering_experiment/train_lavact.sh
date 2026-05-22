@@ -1,17 +1,17 @@
 #!/bin/bash
 
 # Configuration variables
-DATASET_PREFIX="so101_individual_cases_new"
+DATASET_PREFIX="so101_sorting_case_"
 
 
-BASE_JOB_NAME="lavact_so101_10epoch"
+BASE_JOB_NAME="ordering_lavact_so101_10epoch"
 BASE_OUTPUT_DIR="outputs/train/${BASE_JOB_NAME}"
 DEVICE="cuda"  # Use "cuda" for GPU or "cpu" for CPU
 
 # Random seeds to loop over
 SEEDS=(42 123 456 100 101 102 103 104 105 106)
 
-PERCENTS=(0.2 0.4 0.6 0.8 1.0)
+PERCENTS=(0.33 0.66 1.0)
 
 
 ENABLE_WANDB=true  # Set to true to enable Weights & Biases logging
