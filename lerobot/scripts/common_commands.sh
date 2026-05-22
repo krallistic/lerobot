@@ -130,7 +130,11 @@ python -m lerobot.teleoperate \
     --teleop.port=/dev/ttyACM1 \
     --teleop.id=so101_leader \
     --fps=30 \
+<<<<<<< HEAD
     --display_data=false
+=======
+    --display_data=true
+>>>>>>> 93d084bfd4aba1409fd3d3436dea40f9da849d52
 
 
 python -m lerobot.record \
@@ -149,5 +153,8 @@ python -m lerobot.record \
     --dataset.num_episodes=3 \
     --dataset.single_task="Test"
 
+<<<<<<< HEAD
 python lerobot/scripts/visualize_dataset_html.py \
   --repo-id ${HF_USER}/so100_individual_cases_simple_blue-cylinder-2-B 
+=======
+>>>>>>> 93d084bfd4aba1409fd3d3436dea40f9da849d52
