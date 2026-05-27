@@ -25,7 +25,9 @@ import grpc
 import numpy as np
 import torch
 
+from lerobot.common.policies.factory import get_policy_class
 from lerobot.common.policies.pretrained import PreTrainedPolicy
+from lerobot.configs.policies import PreTrainedConfig
 from lerobot.scripts.server.helpers import RemotePolicyConfig, TimedAction, TimedObservation
 from lerobot.scripts.server.services_pb2 import Actions, Empty
 from lerobot.scripts.server.services_pb2_grpc import (
@@ -86,7 +88,9 @@ class LeRobotPolicyServicer(AsyncInferenceServicer):
             f"[server] Loading policy type={config.policy_type!r} "
             f"from {config.pretrained_name_or_path!r} on {config.device}"
         )
-        policy = PreTrainedPolicy.from_pretrained(config.pretrained_name_or_path)
+        policy_cfg = PreTrainedConfig.from_pretrained(config.pretrained_name_or_path)
+        policy_cls = get_policy_class(policy_cfg.type)
+        policy = policy_cls.from_pretrained(config.pretrained_name_or_path)
         policy = policy.to(config.device)
         policy.eval()
         self._policy = policy
