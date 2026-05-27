@@ -314,6 +314,9 @@ def train(cfg: TrainPipelineConfig):
     logging.info(f"dataset.num_episodes={dataset_num_episodes}")
     logging.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
     logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
+    logging.info("[DEBUG] Dataset features:")
+    for feat_name, feat in dataset.features.items():
+        logging.info(f"[DEBUG]   {feat_name}: shape={feat.get('shape')}, dtype={feat.get('dtype')}")
 
     # create dataloader for offline training
     if hasattr(cfg.policy, "drop_n_last_frames"):
