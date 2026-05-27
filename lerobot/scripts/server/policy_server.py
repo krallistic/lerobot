@@ -124,7 +124,7 @@ class LeRobotPolicyServicer(AsyncInferenceServicer):
                     TimedAction(
                         timestamp=time.time(),
                         timestep=timed_obs.timestep + i,
-                        action=action.cpu().numpy()[0],
+                        action=action.cpu()[0],
                     )
                 )
         self._latest_actions = actions
