@@ -77,6 +77,38 @@ class ConceptACTPolicy(ACTPolicy):
             {'params': rbf_params, 'lr': self.config.optimizer_lr * 100.0}
         ]
 
+    def _apply_concept_noise(self, batch: dict) -> dict:
+        """Corrupt one-hot concept targets in-place (training only).
+
+        For each concept class and each sample in the batch, with probability
+        config.concept_noise the true one-hot label is replaced with a uniformly
+        random *different* one-hot from the same class.  The one-hot constraint
+        within each class is always preserved.
+        """
+        batch = dict(batch)  # shallow copy — don't mutate the original
+        for concept_name, num_classes in self.config.concept_types.items():
+            if concept_name not in batch:
+                continue
+            targets = batch[concept_name]          # (B, num_classes), int64 one-hot
+            B = targets.shape[0]
+            flip_mask = torch.rand(B, device=targets.device) < self.config.concept_noise
+            if not flip_mask.any():
+                continue
+            current = targets.argmax(dim=-1)       # (B,)
+            new_cls = torch.randint(0, num_classes, (B,), device=targets.device)
+            # Guarantee we pick a *different* class (fast: terminates in ~1/(1-1/K) steps)
+            retry = (new_cls == current) & flip_mask
+            while retry.any():
+                new_cls[retry] = torch.randint(
+                    0, num_classes, (int(retry.sum()),), device=targets.device
+                )
+                retry = (new_cls == current) & flip_mask
+            noisy = targets.clone()
+            idx = flip_mask.nonzero(as_tuple=True)[0]
+            noisy[idx] = F.one_hot(new_cls[idx], num_classes=num_classes).to(targets.dtype)
+            batch[concept_name] = noisy
+        return batch
+
     def _calculate_concept_metrics(self, predictions, targets, method_type="binary"):
         """Calculate detailed metrics for concept predictions.
 
@@ -156,6 +188,10 @@ class ConceptACTPolicy(ACTPolicy):
             batch["observation.images"] = [batch[key] for key in self.config.image_features]
 
         batch = self.normalize_targets(batch)
+
+        # Corrupt concept labels with random noise during training (noop when concept_noise=0).
+        if self.config.use_concept_learning and self.training and self.config.concept_noise > 0.0:
+            batch = self._apply_concept_noise(batch)
 
         # Call the model with different outputs based on whether concept learning is enabled
         if self.config.use_concept_learning:

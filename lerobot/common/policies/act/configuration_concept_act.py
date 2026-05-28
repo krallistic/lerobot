@@ -113,6 +113,11 @@ class ConceptACTConfig(ACTConfig):
 
     concept_dim: int = 128
     concept_weight: float = 1.0
+    # Per-class label noise applied during training only.  For each sample and
+    # each concept class, the true one-hot label is replaced with a uniformly
+    # random *different* one-hot from that class with this probability.
+    # 0.0 = disabled (default).
+    concept_noise: float = 0.0
     concept_types: dict = field(
         default_factory=lambda: {
             "concept_color": 4,  # red, green, yellow, blue
