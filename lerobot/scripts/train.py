@@ -314,9 +314,6 @@ def train(cfg: TrainPipelineConfig):
     logging.info(f"dataset.num_episodes={dataset_num_episodes}")
     logging.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
     logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
-    logging.info("[DEBUG] Dataset features:")
-    for feat_name, feat in dataset.features.items():
-        logging.info(f"[DEBUG]   {feat_name}: shape={feat.get('shape')}, dtype={feat.get('dtype')}")
 
     # create dataloader for offline training
     if hasattr(cfg.policy, "drop_n_last_frames"):
@@ -351,7 +348,14 @@ def train(cfg: TrainPipelineConfig):
     # Track current epoch if using epochs mode
     current_epoch = 0
     steps_per_epoch = len(train_dataloader) if using_epochs else None
-    assert cfg.steps // steps_per_epoch == cfg.epochs
+    logging.info("[DEBUG] Dataset features:")
+    for feat_name, feat in dataset.features.items():
+        if isinstance(feat, dict):
+            logging.info(f"[DEBUG]   {feat_name}: shape={feat.get('shape')}, dtype={feat.get('dtype')}")
+        else:
+            logging.info(f"[DEBUG]   {feat_name}: {feat!r}")
+    if using_epochs:
+        assert cfg.steps // steps_per_epoch == cfg.epochs
     logging.info("Start offline training on a fixed dataset")
     for _ in range(step, cfg.steps):
         start_time = time.perf_counter()
