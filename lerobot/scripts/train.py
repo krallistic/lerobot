@@ -118,7 +118,7 @@ def update_policy(
 
 
 def validataion_loss_eval(policy: PreTrainedPolicy, dataloader: torch.utils.data.DataLoader, cfg: TrainPipelineConfig):
-    #return  0.0
+    return  0.0
     loss_cumsum = 0
     n_examples_evaluated = 0
     for batch in dataloader:
