@@ -370,6 +370,10 @@ class ConceptACTPolicy(ACTPolicy):
             )
             loss_dict["kld_loss"] = mean_kld.item()
             total_loss = total_loss + mean_kld * self.config.kl_weight
+        else:
+            # Keep loss_dict keys stable when the VAE is off (e.g. the CBM variant):
+            # train.py reads output_dict['kld_loss'] unconditionally for ConceptACTPolicy.
+            loss_dict["kld_loss"] = 0.0
 
         return total_loss, loss_dict
 
