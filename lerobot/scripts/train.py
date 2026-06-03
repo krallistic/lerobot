@@ -316,7 +316,12 @@ def train(cfg: TrainPipelineConfig):
     logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
 
     # create dataloader for offline training
-    if hasattr(cfg.policy, "drop_n_last_frames"):
+    # NOTE: this sampler is currently unused (split_dataset_random below builds its own
+    # DataLoader with sampler=None), but the EpisodeAwareSampler still needs a single
+    # dataset's episode_data_index — a MultiLeRobotDataset (multiple training cases) has
+    # no such attribute, so guard on it. Policies without drop_n_last_frames (e.g. ACT)
+    # skip this entirely; diffusion has it and would otherwise crash on the multi-dataset.
+    if hasattr(cfg.policy, "drop_n_last_frames") and hasattr(dataset, "episode_data_index"):
         shuffle = False
         sampler = EpisodeAwareSampler(
             dataset.episode_data_index,
