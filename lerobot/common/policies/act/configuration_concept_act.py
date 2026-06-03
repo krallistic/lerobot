@@ -20,6 +20,11 @@ from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import NormalizationMode
 from lerobot.common.policies.act.configuration_act import ACTConfig
 
+# Concept groups for the "which concepts matter?" ablation (see ConceptACTConfig.concept_group).
+#   object = the perceptual object attributes;  rule = the target/sorting-rule concept.
+OBJECT_CONCEPTS = ("concept_color", "concept_shape")
+RULE_CONCEPTS = ("concept_dropoff",)
+
 @PreTrainedConfig.register_subclass("concept_act")
 @dataclass
 class ConceptACTConfig(ACTConfig):
@@ -108,8 +113,20 @@ class ConceptACTConfig(ACTConfig):
 
     # Concept learning.
     use_concept_learning: bool = False
-    concept_method: str = "prediction_head"  # Options: "prediction_head", "transformer"
+    # Options: "prediction_head", "transformer", "transformer_ce", "transformer_bce", "flat_transformer".
+    # "flat_transformer" = single (non-class-aware) concept transformer + per-entry BCE on the
+    # concatenated concept vector; it ignores use_class_aware_concepts (ablation of the class structure).
+    concept_method: str = "prediction_head"
     use_class_aware_concepts: bool = False
+    # Restrict concept supervision to a subset of concept_types (ablation: which concepts
+    # matter?). "all" = every concept; "object" = concept_color + concept_shape; "rule" =
+    # concept_dropoff (the target/sorting-rule concept). Applied in __post_init__ so the
+    # architecture and the loss both see only the kept concepts.
+    concept_group: str = "all"  # Options: "all", "object", "rule"
+    # Concept Bottleneck Model: when True, the action decoder may attend ONLY to a token
+    # built from the predicted concepts, so actions flow *through* the concept layer
+    # (instead of using concepts as an auxiliary side-output). Crude/minimal by design.
+    use_concept_bottleneck: bool = False
 
     concept_dim: int = 128
     concept_weight: float = 1.0
@@ -137,9 +154,26 @@ class ConceptACTConfig(ACTConfig):
     def __post_init__(self):
         super().__post_init__()
 
-        if self.use_concept_learning and self.concept_method not in ["prediction_head", "transformer", "transformer_ce", "transformer_bce"]:
+        # Optionally restrict supervision to a concept subset (object-vs-rule ablation).
+        if self.concept_group != "all":
+            if self.concept_group == "object":
+                keep = OBJECT_CONCEPTS
+            elif self.concept_group == "rule":
+                keep = RULE_CONCEPTS
+            else:
+                raise ValueError(
+                    f"concept_group must be 'all', 'object', or 'rule'. Got {self.concept_group}."
+                )
+            self.concept_types = {k: v for k, v in self.concept_types.items() if k in keep}
+            if self.use_concept_learning and not self.concept_types:
+                raise ValueError(
+                    f"concept_group='{self.concept_group}' kept no concepts from concept_types."
+                )
+
+        if self.use_concept_learning and self.concept_method not in ["prediction_head", "transformer", "transformer_ce", "transformer_bce", "flat_transformer"]:
             raise ValueError(
-                f"Concept method must be one of 'prediction_head' or 'transformer'. Got {self.concept_method}."
+                "Concept method must be one of 'prediction_head', 'transformer', 'transformer_ce', "
+                f"'transformer_bce', 'flat_transformer'. Got {self.concept_method}."
             )
         if self.use_concept_learning and self.concept_method == "prediction_head" and not self.concept_types:
             raise ValueError(

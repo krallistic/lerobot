@@ -317,6 +317,29 @@ class ConceptACTPolicy(ACTPolicy):
             loss_dict["concept_loss"] = concept_loss.item()
             total_loss = total_loss + concept_loss * self.config.concept_weight
 
+        elif self.config.use_concept_learning and self.config.concept_method == "flat_transformer":
+            # FLAT (no class structure): treat the concatenated concept vector as a set of
+            # independent binary labels and apply per-entry BCE. Ablates BOTH the class-aware
+            # architecture (forced off in the encoder) and the per-class softmax CE of transformer_ce.
+            all_targets = torch.concatenate(
+                [batch[key] for key in sorted(self.config.concept_types.keys())], dim=-1
+            ).float()
+
+            # Global, class-agnostic positive weighting to offset one-hot sparsity; computed
+            # from the batch so it introduces no per-class structure.
+            num_pos = all_targets.sum()
+            num_neg = all_targets.numel() - num_pos
+            pos_weight = (num_neg / num_pos.clamp(min=1.0)).detach()
+
+            concept_loss = F.binary_cross_entropy_with_logits(
+                concepts_hat, all_targets, pos_weight=pos_weight
+            )
+
+            concept_metrics = self._calculate_concept_metrics(concepts_hat, all_targets, method_type="binary")
+            loss_dict.update(concept_metrics)
+            loss_dict["concept_loss"] = concept_loss.item()
+            total_loss = total_loss + concept_loss * self.config.concept_weight
+
         elif self.config.use_concept_learning and self.config.concept_method == "transformer":
             # For transformer method, keep the existing MSE loss implementation
             target_concepts = torch.concatenate([batch[key] for key, value in sorted(self.config.concept_types.items())], dim=-1).float()
@@ -401,6 +424,13 @@ class ConceptACT(ACT):
         super().__init__(config)
         self.config = config
         self.encoder = ConceptACTEncoder(config)
+
+        # Concept Bottleneck Model: build a single decoder-memory token from the predicted
+        # concepts so actions can only flow through the concept layer. Crude on purpose.
+        if config.use_concept_bottleneck:
+            total_concepts = sum(config.concept_types.values())
+            self.bottleneck_proj = nn.Linear(total_concepts, config.dim_model)
+            self.bottleneck_pos_embed = nn.Embedding(1, config.dim_model)
         
 
 
@@ -537,12 +567,28 @@ class ConceptACT(ACT):
             dtype=encoder_in_pos_embed.dtype,
             device=encoder_in_pos_embed.device,
         )
-        
-        # Run decoder with cross-attention to encoder output
+
+        # Concept Bottleneck: insert a concept-only layer between encoder and decoder.
+        # The decoder then cross-attends to a single token derived from the predicted
+        # concepts, so the only path from observation to action is through the concepts.
+        if self.config.use_concept_bottleneck:
+            if isinstance(concepts, dict):  # prediction_head: {class: logits (B, n_class)}
+                concept_vec = torch.cat(
+                    [F.softmax(concepts[k], dim=-1) for k in sorted(concepts.keys())], dim=-1
+                )
+            else:                            # transformer_*: (B, total_concepts)
+                concept_vec = concepts
+            decoder_memory = self.bottleneck_proj(concept_vec).unsqueeze(0)   # (1, B, D)
+            decoder_memory_pos = self.bottleneck_pos_embed.weight.unsqueeze(1)  # (1, 1, D)
+        else:
+            decoder_memory = encoder_out
+            decoder_memory_pos = encoder_in_pos_embed
+
+        # Run decoder with cross-attention to the (bottleneck or full-encoder) memory
         decoder_out = self.decoder(
             decoder_in,
-            encoder_out,
-            encoder_pos_embed=encoder_in_pos_embed,
+            decoder_memory,
+            encoder_pos_embed=decoder_memory_pos,
             decoder_pos_embed=self.decoder_pos_embed.weight.unsqueeze(1),
         )
 
@@ -594,9 +640,11 @@ class ConceptACTEncoder(nn.Module):
                     )
                     for concept_name, num_classes in sorted(config.concept_types.items())
                 })
-            elif config.concept_method == "transformer" or config.concept_method == "transformer_ce" or config.concept_method == "transformer_bce":
-                # Create a transformer-based concept learning module
-                if config.use_class_aware_concepts:
+            elif config.concept_method in ("transformer", "transformer_ce", "transformer_bce", "flat_transformer"):
+                # Create a transformer-based concept learning module.
+                # flat_transformer deliberately ablates the class structure, so it always
+                # uses the single (non-class-aware) layer regardless of use_class_aware_concepts.
+                if config.use_class_aware_concepts and config.concept_method != "flat_transformer":
                     concept_layer = ClassAwareConceptACTEncoderLayer(config)
                 else:
                     concept_layer = ConceptACTEncoderLayer(config)
@@ -631,7 +679,7 @@ class ConceptACTEncoder(nn.Module):
 
             #concepts = torch.concatenate([value for key, value in sorted(concepts_dict)], dim=-1)
             concepts = concepts_dict
-        elif self.config.concept_method == "transformer" or self.config.concept_method == "transformer_ce" or self.config.concept_method == "transformer_bce":
+        elif self.config.concept_method in ("transformer", "transformer_ce", "transformer_bce", "flat_transformer"):
             # Process the last layer, which is a concept layer
             last_layer = self.layers[-1]
             x, concepts = last_layer(x, pos_embed=pos_embed, key_padding_mask=key_padding_mask)
