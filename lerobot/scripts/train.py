@@ -72,6 +72,7 @@ def update_policy(
     policy.train()
     with torch.autocast(device_type=device.type) if use_amp else nullcontext():
         loss, output_dict = policy.forward(batch)
+        output_dict = output_dict or {}  # some policies (e.g. diffusion) return None
         # TODO(rcadene): policy.unnormalize_outputs(out_dict)
     grad_scaler.scale(loss).backward()
 
@@ -376,6 +377,7 @@ def train(cfg: TrainPipelineConfig):
             # Get the loss dict from the first forward pass to determine metrics
             with torch.no_grad():
                 _, sample_output_dict = policy.forward(batch)
+            sample_output_dict = sample_output_dict or {}  # diffusion returns None
 
             # Create metrics tracker based on the loss dictionary
             train_tracker = create_metrics_tracker(sample_output_dict, cfg, train_dataloader, step)
