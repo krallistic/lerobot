@@ -37,8 +37,11 @@ class ConceptACTPolicy(ACTPolicy):
         self.model = ConceptACT(config)
         #self.model = torch.compile(model=ConceptACT(config))
 
-        # Set up concept normalization if concept learning is enabled
-        if "concept" in dataset_stats:
+        # Set up concept normalization if concept learning is enabled.
+        # dataset_stats is None when loading via from_pretrained (e.g. the gRPC
+        # policy server at eval time) — stats come from the saved buffers, not
+        # from a passed-in dict — so guard against None before the membership test.
+        if dataset_stats is not None and "concept" in dataset_stats:
             self.normalize_concepts = nn.ModuleDict({
                 "concept": self.normalize_inputs.normalization_modules["observation.concept"]
             })
