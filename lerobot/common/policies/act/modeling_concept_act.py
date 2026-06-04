@@ -390,23 +390,29 @@ class ConceptACTPolicy(ACTPolicy):
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch["observation.images"] = [batch[key] for key in self.config.image_features]
 
-        # Concept learning has no impact on action selection, as we only use the action outputs
-        if self.config.use_concept_learning:
-            actions, _, _ = self.model(batch)
-        else:
-            actions, _ = self.model(batch)
+        def _forward_actions():
+            # Concept predictions don't affect action selection — only the actions are used.
+            if self.config.use_concept_learning:
+                actions, _, _ = self.model(batch)
+            else:
+                actions, _ = self.model(batch)
+            return actions
 
         # If we are doing temporal ensembling, do online updates where we keep track of the number of actions
-        # we are ensembling over.
+        # we are ensembling over. This requires a fresh forward on every call.
         if self.config.temporal_ensemble_coeff is not None:
+            actions = _forward_actions()
             actions = actions[0]  # (batch_size, chunk_size, action_dim)
             actions = self.unnormalize_outputs({"action": actions})["action"]
             action = self.temporal_ensembler.update(actions)
             return action
 
         # Action queue logic for n_action_steps > 1. When the action_queue is depleted, populate it by
-        # querying the policy.
+        # querying the policy. The model forward (ResNet backbone + transformer) MUST stay inside this guard:
+        # the policy server calls select_action `actions_per_chunk` times per chunk, so running the forward
+        # unconditionally recomputes the same chunk every call and throws all but the first away (~16x slower).
         if len(self._action_queue) == 0:
+            actions = _forward_actions()
             actions = actions[:, : self.config.n_action_steps]
 
             # TODO(rcadene): make _forward return output dictionary?
